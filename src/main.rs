@@ -16,13 +16,15 @@ enum PrepareResult {
     Success(Statement),
     UnrecognizedStatement,
     SyntaxError,
+    NegativeId,
+    StringTooLong,
 }
-enum StatementType {
+pub enum StatementType {
     Insert,
     Select,
 }
 
-struct Statement {
+pub struct Statement {
     statement_type: StatementType,
     row_to_insert: Option<Row>,
 }
@@ -60,7 +62,15 @@ fn main() {
                         }
                         PrepareResult::SyntaxError => {
                             input.pop();
-                            println!("SYNTAX ERROR: {}", input);
+                            println!("SYNTAX ERROR: Could not parse statement");
+                        }
+                        PrepareResult::StringTooLong => {
+                            input.pop();
+                            println!("String is too long!");
+                        }
+                        PrepareResult::NegativeId => {
+                            input.pop();
+                            println!("ID must be positive!");
                         }
                     }
                 }
@@ -81,18 +91,41 @@ fn do_meta_command(command: &String) -> MetaCommand {
 
 fn prepare_statement(statement: &String) -> PrepareResult {
     if statement.starts_with("insert") {
-        let re = Regex::new(r"^insert (\d+) (\w+) ([\w@\.]+)").unwrap();
+        let re = Regex::new(r"^insert (-?\d+) (\w+) ([\w@\.]+)").unwrap();
         match re.captures(statement) {
             Some(cap) => {
-                let row = Row {
-                    id: cap.get(1).unwrap().as_str().parse().unwrap(),
-                    username: cap.get(2).unwrap().as_str().parse().unwrap(),
-                    email: cap.get(3).unwrap().as_str().parse().unwrap(),
+                let id: u32 = if let Ok(i) = cap.get(1).unwrap().as_str().parse() {
+                    i
+                } else {
+                    return PrepareResult::NegativeId;
+                };
+
+                let username: String =
+                    if let Ok(user) = cap.get(2).unwrap().as_str().parse::<String>() {
+                        if user.len() > 32 {
+                            return PrepareResult::StringTooLong;
+                        }
+                        user
+                    } else {
+                        return PrepareResult::SyntaxError;
+                    };
+
+                let email: String = if let Ok(e) = cap.get(3).unwrap().as_str().parse::<String>() {
+                    if e.len() > 255 {
+                        return PrepareResult::StringTooLong;
+                    }
+                    e
+                } else {
+                    return PrepareResult::SyntaxError;
                 };
 
                 PrepareResult::Success(Statement {
                     statement_type: StatementType::Insert,
-                    row_to_insert: Some(row),
+                    row_to_insert: Some(Row {
+                        id,
+                        username,
+                        email,
+                    }),
                 })
             }
             None => PrepareResult::SyntaxError,

@@ -8,12 +8,13 @@ const ROW_SIZE: usize = 291;
 const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
 const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
+#[derive(Debug, PartialEq)]
 pub enum ExecuteResult {
     InsertSuccess,
     SelectSuccess(Vec<Row>),
     TableFull,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub id: u32,
     pub username: String,
@@ -128,8 +129,8 @@ impl Table {
 
 #[cfg(test)]
 mod tests {
-    use crate::datastore::Page;
-    use crate::Row;
+    use crate::datastore::{Page, TABLE_MAX_ROWS};
+    use crate::{ExecuteResult, Row, Statement, StatementType, Table};
 
     #[test]
     fn serialize_tests() {
@@ -190,5 +191,73 @@ mod tests {
         assert_eq!(r.id, sel.id);
         assert_eq!(r.username, sel.username);
         assert_eq!(r.email, sel.email);
+    }
+
+    #[test]
+    fn table_insert_single_row() {
+        let mut table = Table::new();
+        let row = Row {
+            id: 0,
+            username: String::from("bbuford"),
+            email: String::from("bbuford@example.com"),
+        };
+
+        let statement = Statement {
+            statement_type: StatementType::Insert,
+            row_to_insert: Some(row),
+        };
+
+        assert_eq!(
+            table.execute_statement(statement),
+            ExecuteResult::InsertSuccess
+        );
+
+        let statement = Statement {
+            statement_type: StatementType::Select,
+            row_to_insert: None,
+        };
+
+        let res = table.execute_statement(statement);
+        assert!(matches!(res, ExecuteResult::SelectSuccess { .. }));
+        match res {
+            ExecuteResult::SelectSuccess(rows) => {
+                assert_eq!(rows.len(), 1);
+                let row = &rows[0];
+                assert_eq!(row.id, 0);
+                assert_eq!(row.username, String::from("bbuford"));
+                assert_eq!(row.email, String::from("bbuford@example.com"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn table_insert_max_rows() {
+        let mut table = Table::new();
+        for i in 0..TABLE_MAX_ROWS {
+            assert_eq!(
+                table.execute_statement(Statement {
+                    statement_type: StatementType::Insert,
+                    row_to_insert: Some(Row {
+                        id: i as u32,
+                        username: String::from(format!("user{i}")),
+                        email: String::from(format!("user{i}@example.com")),
+                    }),
+                }),
+                ExecuteResult::InsertSuccess
+            );
+        }
+
+        assert_eq!(
+            table.execute_statement(Statement {
+                statement_type: StatementType::Insert,
+                row_to_insert: Some(Row {
+                    id: TABLE_MAX_ROWS as u32,
+                    username: String::from(format!("user{TABLE_MAX_ROWS}")),
+                    email: String::from(format!("user{TABLE_MAX_ROWS}@example.com")),
+                }),
+            }),
+            ExecuteResult::TableFull
+        );
     }
 }
