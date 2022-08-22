@@ -1,6 +1,7 @@
 extern crate core;
 
 mod datastore;
+mod pager;
 
 use crate::datastore::{ExecuteResult, Row, Table};
 use regex::Regex;
@@ -31,14 +32,14 @@ pub struct Statement {
 
 fn main() {
     let mut input = String::new();
-    let mut table = Table::new();
+    let mut table = Table::open("db.db");
     loop {
         print!("db> ");
         io::stdout().flush().unwrap();
         match io::stdin().read_line(&mut input) {
             Ok(_) => {
                 if input.starts_with(".") {
-                    match do_meta_command(&input) {
+                    match do_meta_command(&input, &mut table) {
                         MetaCommand::UnrecognizedCommand => {
                             input.pop();
                             println!("Unrecognized command: {}", input);
@@ -81,8 +82,9 @@ fn main() {
     }
 }
 
-fn do_meta_command(command: &String) -> MetaCommand {
+fn do_meta_command(command: &String, table: &mut Table) -> MetaCommand {
     if command.starts_with(".exit") {
+        table.close();
         exit(0);
     } else {
         MetaCommand::UnrecognizedCommand

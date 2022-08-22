@@ -1,11 +1,10 @@
+use crate::pager::{Page, Pager, PAGE_SIZE, TABLE_MAX_PAGES};
 use crate::{Statement, StatementType};
-use std::borrow::BorrowMut;
 use std::fmt::Formatter;
+use std::path::Path;
 
-const PAGE_SIZE: usize = 4096;
-const TABLE_MAX_PAGES: usize = 100;
-const ROW_SIZE: usize = 291;
-const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
+pub const ROW_SIZE: usize = 291;
+const ROWS_PER_PAGE: usize = PAGE_SIZE as usize / ROW_SIZE;
 const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
 #[derive(Debug, PartialEq)]
@@ -58,51 +57,37 @@ impl Row {
         }
     }
 }
-#[derive(Debug)]
-pub struct Page(Box<Box<[u8]>>);
-impl Page {
-    pub fn new() -> Self {
-        Self(Box::new(vec![0 as u8; PAGE_SIZE].into_boxed_slice()))
-    }
-
-    pub fn insert(&mut self, row: Row, slot: usize) {
-        let min = slot * ROW_SIZE;
-        let max = min + ROW_SIZE;
-        self.0[min..max].swap_with_slice(&mut *row.serialize());
-    }
-
-    pub fn select(&self, slot: usize) -> Row {
-        let min = slot * ROW_SIZE;
-        let max = min + ROW_SIZE;
-        Row::deserialize(&self.0[min..max])
-    }
-}
 
 pub struct Table {
-    num_rows: u32,
-    pages: Vec<Page>,
+    num_rows: usize,
+    pager: Pager,
 }
 
 impl Table {
-    pub fn new() -> Self {
-        Table {
-            num_rows: 0,
-            pages: Vec::with_capacity(TABLE_MAX_PAGES),
-        }
+    pub fn open(filename: impl AsRef<Path>) -> Self {
+        let pager = Pager::open(filename);
+        let num_rows = dbg!(pager.file_length() / ROW_SIZE);
+        Table { num_rows, pager }
     }
+
     pub fn execute_statement(&mut self, stmt: Statement) -> ExecuteResult {
         match stmt.statement_type {
             StatementType::Insert => self.execute_insert(stmt.row_to_insert.unwrap()),
             StatementType::Select => self.execute_select(),
         }
     }
+
+    pub fn close(&mut self) {
+        self.pager.close()
+    }
+
     fn execute_insert(&mut self, row: Row) -> ExecuteResult {
         if self.num_rows as usize >= TABLE_MAX_ROWS {
             return ExecuteResult::TableFull;
         }
 
         let page_slot = self.num_rows as usize % ROWS_PER_PAGE;
-        let mut page = self.row_slot(self.num_rows);
+        let page = self.row_slot(self.num_rows);
         page.insert(row, page_slot);
         self.num_rows += 1;
         ExecuteResult::InsertSuccess
@@ -111,19 +96,15 @@ impl Table {
     fn execute_select(&mut self) -> ExecuteResult {
         let mut rows = Vec::with_capacity(self.num_rows as usize);
         for r in 0..self.num_rows as usize {
-            let page = self.row_slot(r as u32);
+            let page = self.row_slot(r);
             rows.push(page.select(r % ROWS_PER_PAGE));
         }
         ExecuteResult::SelectSuccess(rows)
     }
 
-    fn row_slot(&mut self, row_num: u32) -> &mut Page {
-        let page_num = row_num as usize / ROWS_PER_PAGE;
-        assert!(page_num <= TABLE_MAX_PAGES);
-        if page_num == self.pages.len() {
-            self.pages.push(Page::new());
-        }
-        self.pages[page_num].borrow_mut()
+    fn row_slot(&mut self, row_num: usize) -> &mut Page {
+        let page_num = row_num / ROWS_PER_PAGE;
+        self.pager.get_page(page_num)
     }
 }
 
@@ -195,7 +176,7 @@ mod tests {
 
     #[test]
     fn table_insert_single_row() {
-        let mut table = Table::new();
+        let mut table = Table::open("test.db");
         let row = Row {
             id: 0,
             username: String::from("bbuford"),
@@ -233,7 +214,7 @@ mod tests {
 
     #[test]
     fn table_insert_max_rows() {
-        let mut table = Table::new();
+        let mut table = Table::open("test.db");
         for i in 0..TABLE_MAX_ROWS {
             assert_eq!(
                 table.execute_statement(Statement {
