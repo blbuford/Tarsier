@@ -1,11 +1,12 @@
+use crate::cursor::Cursor;
 use crate::pager::{Page, Pager, PAGE_SIZE, TABLE_MAX_PAGES};
 use crate::{Statement, StatementType};
 use std::fmt::Formatter;
 use std::path::Path;
 
 pub const ROW_SIZE: usize = 291;
-const ROWS_PER_PAGE: usize = PAGE_SIZE as usize / ROW_SIZE;
-const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
+pub const ROWS_PER_PAGE: usize = PAGE_SIZE as usize / ROW_SIZE;
+pub const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
 #[derive(Debug, PartialEq)]
 pub enum ExecuteResult {
@@ -81,30 +82,42 @@ impl Table {
         self.pager.close()
     }
 
+    pub fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+
+    pub fn get_page(&mut self, page_num: usize) -> &mut Page {
+        self.pager.get_page(page_num)
+    }
+
     fn execute_insert(&mut self, row: Row) -> ExecuteResult {
         if self.num_rows as usize >= TABLE_MAX_ROWS {
             return ExecuteResult::TableFull;
         }
 
-        let page_slot = self.num_rows as usize % ROWS_PER_PAGE;
-        let page = self.row_slot(self.num_rows);
-        page.insert(row, page_slot);
+        let mut cursor = Cursor::end(self);
+        let row_num = cursor.row_num();
+        let page = cursor.value();
+        page.insert(row, row_num % ROWS_PER_PAGE);
         self.num_rows += 1;
         ExecuteResult::InsertSuccess
     }
 
     fn execute_select(&mut self) -> ExecuteResult {
         let mut rows = Vec::with_capacity(self.num_rows as usize);
-        for r in 0..self.num_rows as usize {
-            let page = self.row_slot(r);
-            rows.push(page.select(r % ROWS_PER_PAGE));
+        let mut cursor = Cursor::start(self);
+        while !cursor.is_at_end_of_table() {
+            let row_num = cursor.row_num();
+            let page = cursor.value();
+            if let Some(row) = page.select(row_num % ROWS_PER_PAGE) {
+                rows.push(row);
+            } else {
+                break;
+            }
+
+            cursor.advance();
         }
         ExecuteResult::SelectSuccess(rows)
-    }
-
-    fn row_slot(&mut self, row_num: usize) -> &mut Page {
-        let page_num = row_num / ROWS_PER_PAGE;
-        self.pager.get_page(page_num)
     }
 }
 
@@ -112,7 +125,17 @@ impl Table {
 mod tests {
     use crate::datastore::{Page, TABLE_MAX_ROWS};
     use crate::{ExecuteResult, Row, Statement, StatementType, Table};
+    use std::fs::OpenOptions;
 
+    fn open_test_db() -> Table {
+        let test_db = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open("test.db")
+            .expect("test database");
+        test_db.sync_all().expect("sync changes to disk");
+        Table::open("test.db")
+    }
     #[test]
     fn serialize_tests() {
         let r = Row {
@@ -163,12 +186,12 @@ mod tests {
         };
         p.insert(r.clone(), 0);
         p.insert(r.clone(), 1);
-        let sel = p.select(0);
+        let sel = p.select(0).unwrap();
         assert_eq!(r.id, sel.id);
         assert_eq!(r.username, sel.username);
         assert_eq!(r.email, sel.email);
 
-        let sel = p.select(1);
+        let sel = p.select(1).unwrap();
         assert_eq!(r.id, sel.id);
         assert_eq!(r.username, sel.username);
         assert_eq!(r.email, sel.email);
@@ -176,7 +199,7 @@ mod tests {
 
     #[test]
     fn table_insert_single_row() {
-        let mut table = Table::open("test.db");
+        let mut table = open_test_db();
         let row = Row {
             id: 0,
             username: String::from("bbuford"),
@@ -214,7 +237,7 @@ mod tests {
 
     #[test]
     fn table_insert_max_rows() {
-        let mut table = Table::open("test.db");
+        let mut table = open_test_db();
         for i in 0..TABLE_MAX_ROWS {
             assert_eq!(
                 table.execute_statement(Statement {

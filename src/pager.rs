@@ -125,19 +125,22 @@ impl Page {
     }
 
     pub fn insert(&mut self, row: Row, slot: usize) {
-        let min = dbg!(slot * ROW_SIZE);
-        let max = dbg!(min + ROW_SIZE);
+        let min = slot * ROW_SIZE;
+        let max = min + ROW_SIZE;
         self.data[min..max].swap_with_slice(&mut *row.serialize());
         if max > self.length {
             self.length = max;
         }
-        dbg!(self.length);
     }
 
-    pub fn select(&self, slot: usize) -> Row {
+    pub fn select(&self, slot: usize) -> Option<Row> {
         let min = slot * ROW_SIZE;
         let max = min + ROW_SIZE;
-        Row::deserialize(&self.data[min..max])
+        if max <= self.length {
+            Some(Row::deserialize(&self.data[min..max]))
+        } else {
+            None
+        }
     }
 
     pub fn write(&self, mut writer: impl Write) -> std::io::Result<usize> {
