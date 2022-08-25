@@ -1,45 +1,57 @@
-use crate::datastore::ROWS_PER_PAGE;
-use crate::pager::Page;
-use crate::{Row, Table};
+use crate::btree::BTree;
+use crate::Row;
 
 pub struct Cursor<'a> {
-    table: &'a mut Table,
-    row_num: usize,
+    tree: &'a mut BTree,
+    page_num: usize,
+    cell_num: usize,
     end_of_table: bool,
 }
 
 impl<'a> Cursor<'a> {
-    pub fn start(table: &'a mut Table) -> Self {
-        let end_of_table = table.num_rows() == 0;
+    pub fn start(tree: &'a mut BTree) -> Self {
+        let root = tree.root();
+        let page_num = root.page_num;
+        let end_of_table = root.num_cells == 0;
         Self {
-            table,
-            row_num: 0,
+            tree,
+            page_num,
+            cell_num: 0,
             end_of_table,
         }
     }
 
-    pub fn end(table: &'a mut Table) -> Self {
-        let row_num = table.num_rows();
+    pub fn end(tree: &'a mut BTree) -> Self {
+        let root = tree.root();
+        let page_num = root.page_num;
+        let cell_num = root.num_cells;
         Self {
-            table,
-            row_num,
+            tree,
+            page_num,
+            cell_num,
             end_of_table: true,
         }
     }
 
-    pub fn row_num(&self) -> usize {
-        self.row_num
+    pub fn page_num(&self) -> usize {
+        self.page_num
+    }
+    pub fn cell_num(&self) -> usize {
+        self.cell_num
     }
 
-    pub fn value(&mut self) -> &mut Page {
-        let row_num = self.row_num;
-        let page_num = row_num / ROWS_PER_PAGE;
-        self.table.get_page(page_num)
+    pub fn value(&mut self) -> Row {
+        self.tree.get(self.page_num, self.cell_num)
+    }
+
+    pub fn insert_at(&mut self, row: Row) -> bool {
+        self.tree.insert(self.page_num, self.cell_num, row)
     }
 
     pub fn advance(&mut self) {
-        self.row_num += 1;
-        if self.row_num >= self.table.num_rows() {
+        self.cell_num += 1;
+        let node = self.tree.root();
+        if self.cell_num >= node.num_cells {
             self.end_of_table = true;
         }
     }

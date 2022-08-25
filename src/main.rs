@@ -1,5 +1,6 @@
 extern crate core;
 
+mod btree;
 mod cursor;
 mod datastore;
 mod pager;

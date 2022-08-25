@@ -1,3 +1,4 @@
+use crate::btree::{BTree, Node};
 use crate::cursor::Cursor;
 use crate::pager::{Page, Pager, PAGE_SIZE, TABLE_MAX_PAGES};
 use crate::{Statement, StatementType};
@@ -60,15 +61,21 @@ impl Row {
 }
 
 pub struct Table {
-    num_rows: usize,
-    pager: Pager,
+    root_page_num: usize,
+    // pager: Pager,
+    btree: BTree,
 }
 
 impl Table {
     pub fn open(filename: impl AsRef<Path>) -> Self {
-        let pager = Pager::open(filename);
-        let num_rows = dbg!(pager.file_length() / ROW_SIZE);
-        Table { num_rows, pager }
+        let mut pager = Pager::open(filename);
+        let mut btree = BTree::new(pager);
+
+        Table {
+            root_page_num: 0,
+            // pager,
+            btree,
+        }
     }
 
     pub fn execute_statement(&mut self, stmt: Statement) -> ExecuteResult {
@@ -79,42 +86,35 @@ impl Table {
     }
 
     pub fn close(&mut self) {
-        self.pager.close()
+        self.btree.close()
     }
 
-    pub fn num_rows(&self) -> usize {
-        self.num_rows
+    pub fn root_page_num(&self) -> usize {
+        self.root_page_num
     }
 
-    pub fn get_page(&mut self, page_num: usize) -> &mut Page {
-        self.pager.get_page(page_num)
-    }
+    // pub fn get_page(&mut self, page_num: usize) -> &mut Node<usize, Row> {
+    //     self.pager.get_page(page_num)
+    // }
 
+    pub fn get_root_page_num(&self) -> usize {
+        self.root_page_num
+    }
     fn execute_insert(&mut self, row: Row) -> ExecuteResult {
-        if self.num_rows as usize >= TABLE_MAX_ROWS {
+        let mut cursor = Cursor::end(&mut self.btree);
+        if !cursor.insert_at(row) {
             return ExecuteResult::TableFull;
         }
 
-        let mut cursor = Cursor::end(self);
-        let row_num = cursor.row_num();
-        let page = cursor.value();
-        page.insert(row, row_num % ROWS_PER_PAGE);
-        self.num_rows += 1;
         ExecuteResult::InsertSuccess
     }
 
     fn execute_select(&mut self) -> ExecuteResult {
-        let mut rows = Vec::with_capacity(self.num_rows as usize);
-        let mut cursor = Cursor::start(self);
+        let mut rows = Vec::new();
+        let mut cursor = Cursor::start(&mut self.btree);
         while !cursor.is_at_end_of_table() {
-            let row_num = cursor.row_num();
-            let page = cursor.value();
-            if let Some(row) = page.select(row_num % ROWS_PER_PAGE) {
-                rows.push(row);
-            } else {
-                break;
-            }
-
+            let row = cursor.value();
+            rows.push(row.clone());
             cursor.advance();
         }
         ExecuteResult::SelectSuccess(rows)
@@ -186,12 +186,12 @@ mod tests {
         };
         p.insert(r.clone(), 0);
         p.insert(r.clone(), 1);
-        let sel = p.select(0).unwrap();
+        let sel = p.select(0);
         assert_eq!(r.id, sel.id);
         assert_eq!(r.username, sel.username);
         assert_eq!(r.email, sel.email);
 
-        let sel = p.select(1).unwrap();
+        let sel = p.select(1);
         assert_eq!(r.id, sel.id);
         assert_eq!(r.username, sel.username);
         assert_eq!(r.email, sel.email);
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn table_insert_max_rows() {
         let mut table = open_test_db();
-        for i in 0..TABLE_MAX_ROWS {
+        for i in 0..12 {
             assert_eq!(
                 table.execute_statement(Statement {
                     statement_type: StatementType::Insert,
