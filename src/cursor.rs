@@ -30,6 +30,14 @@ impl Cursor {
         }
     }
 
+    pub fn new(page_num: usize, cell_num: usize, end_of_table: bool) -> Self {
+        Self {
+            page_num,
+            cell_num,
+            end_of_table,
+        }
+    }
+
     pub fn page_num(&self) -> usize {
         self.page_num
     }

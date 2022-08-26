@@ -65,9 +65,28 @@ impl BTree {
     pub fn close(&mut self) {
         self.pager.close()
     }
+
+    pub fn find(&self, key: usize) -> Result<Cursor, Cursor> {
+        self.root
+            .find(key)
+            .map(|(page_num, cell_num)| {
+                Cursor::new(
+                    page_num,
+                    cell_num,
+                    self.pager.num_pages() == page_num && cell_num >= 12,
+                )
+            })
+            .map_err(|(page_num, insert_cell_num)| {
+                Cursor::new(
+                    page_num,
+                    insert_cell_num,
+                    self.pager.num_pages() == page_num && insert_cell_num >= 12,
+                )
+            })
+    }
 }
 
-pub struct Node<K, V> {
+pub struct Node<K: Ord, V> {
     pub(crate) is_root: bool,
     pub(crate) node_type: NodeType<K, V>,
     pub(crate) parent_offset: Option<usize>,
@@ -75,7 +94,7 @@ pub struct Node<K, V> {
     pub(crate) page_num: usize,
 }
 
-impl<K, V> Node<K, V> {
+impl<K: Ord, V> Node<K, V> {
     pub fn new() -> Self {
         Self {
             is_root: false,
@@ -107,5 +126,20 @@ impl<K, V> Node<K, V> {
         }
 
         false
+    }
+
+    pub fn find(&self, key: K) -> Result<(usize, usize), (usize, usize)> {
+        match self.node_type {
+            NodeType::Leaf(ref cells) => {
+                if self.num_cells >= 12 {
+                    return Err((usize::MAX, 0));
+                }
+                cells
+                    .binary_search_by(|kv| kv.key.cmp(&key))
+                    .map(|ok| (self.page_num, ok))
+                    .map_err(|err| (self.page_num, err))
+            }
+            _ => todo!(),
+        }
     }
 }

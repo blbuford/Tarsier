@@ -58,6 +58,9 @@ fn main() {
                                 }
                             }
                             ExecuteResult::TableFull => println!("ERROR: TABLE IS FULL"),
+                            ExecuteResult::DuplicateKey => {
+                                println!("ERROR: DUPLICATE PRIMARY KEYS NOT ALLOWED")
+                            }
                         },
                         PrepareResult::UnrecognizedStatement => {
                             input.pop();

@@ -15,6 +15,7 @@ pub enum ExecuteResult {
     InsertSuccess,
     SelectSuccess(Vec<Row>),
     TableFull,
+    DuplicateKey,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -93,20 +94,26 @@ impl Table {
         self.root_page_num
     }
 
-    // pub fn find(&self, key: usize) -> Cursor {
-    //     let mut c = Cursor::start(&mut self.btree);
-    // }
+    pub fn find(&self, key: usize) -> Result<Cursor, Cursor> {
+        self.btree.find(key)
+    }
 
     pub fn get_root_page_num(&self) -> usize {
         self.root_page_num
     }
     fn execute_insert(&mut self, row: Row) -> ExecuteResult {
-        let cursor = Cursor::end(&self.btree);
-        if !self.btree.insert(&cursor, row) {
-            return ExecuteResult::TableFull;
+        match self.find(row.id as usize) {
+            Ok(_duplicate_location) => ExecuteResult::DuplicateKey,
+            Err(cursor) => {
+                if cursor.page_num() == usize::MAX {
+                    return ExecuteResult::TableFull;
+                }
+                if !self.btree.insert(&cursor, row) {
+                    return ExecuteResult::TableFull;
+                }
+                ExecuteResult::InsertSuccess
+            }
         }
-
-        ExecuteResult::InsertSuccess
     }
 
     fn execute_select(&self) -> ExecuteResult {
@@ -236,6 +243,34 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn table_insert_duplicate_keys_throw_error() {
+        let mut table = open_test_db();
+        let row = Row {
+            id: 0,
+            username: String::from("bbuford"),
+            email: String::from("bbuford@example.com"),
+        };
+
+        let statement = Statement {
+            statement_type: StatementType::Insert,
+            row_to_insert: Some(row.clone()),
+        };
+
+        assert_eq!(
+            table.execute_statement(statement),
+            ExecuteResult::InsertSuccess
+        );
+        let statement = Statement {
+            statement_type: StatementType::Insert,
+            row_to_insert: Some(row.clone()),
+        };
+        assert_eq!(
+            table.execute_statement(statement),
+            ExecuteResult::DuplicateKey
+        );
     }
 
     #[test]
