@@ -4,10 +4,12 @@ use crate::btree::{
 };
 use crate::datastore::ROW_SIZE;
 use crate::Row;
-use std::borrow::BorrowMut;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Deref;
 use std::path::Path;
 use std::process::exit;
 
@@ -16,9 +18,10 @@ pub const TABLE_MAX_PAGES: usize = 100;
 
 #[derive(Debug)]
 pub struct Pager {
-    file: File,
+    file: RefCell<File>,
     file_length: u64,
-    pages: Vec<Option<Page>>,
+    num_pages: Cell<usize>,
+    page_cache: RefCell<HashMap<usize, Page>>,
 }
 
 impl Pager {
@@ -28,8 +31,6 @@ impl Pager {
             .write(true)
             .create(true)
             .open(filename);
-        let mut pages: Vec<Option<Page>> = Vec::new();
-
         match file {
             Ok(file) => {
                 let file_length = file.metadata().expect("Metadata for DB open").len();
@@ -37,11 +38,12 @@ impl Pager {
                     println!("DB file is not a whole number of pages. CORRUPT FILE.");
                     panic!();
                 }
-                pages.resize_with(file_length as usize / PAGE_SIZE, || None);
+                let num_pages = Cell::new(file_length as usize / PAGE_SIZE);
                 Self {
-                    file,
+                    file: RefCell::new(file),
                     file_length,
-                    pages,
+                    num_pages,
+                    page_cache: RefCell::new(HashMap::new()),
                 }
             }
             Err(why) => {
@@ -51,55 +53,55 @@ impl Pager {
         }
     }
 
-    pub fn get_page(&mut self, page_num: usize) -> Node<usize, Row> {
-        if page_num >= self.pages.len() {
-            self.pages.push(None);
-        }
-        if self.pages[page_num].is_none() {
-            let mut num_pages = self.file_length / PAGE_SIZE as u64;
-            if self.file_length % (PAGE_SIZE as u64) != 0 {
-                num_pages += 1;
-            }
-
-            if (page_num as u64) < num_pages {
+    pub fn get_page(&self, page_num: usize) -> Node<usize, Row> {
+        if self.page_cache.borrow().get(&page_num).is_none() {
+            if page_num < self.num_pages.get() {
                 self.file
+                    .borrow_mut()
                     .seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64))
                     .expect("Unable to seek to location in file.");
                 let mut page_raw = Box::new([0 as u8; PAGE_SIZE]);
-                match self.file.read(page_raw.as_mut()) {
-                    Ok(_bytes_read) => self.pages[page_num] = Some(Page::load(page_raw)),
+                match self.file.borrow_mut().read(page_raw.as_mut()) {
+                    Ok(_bytes_read) => self
+                        .page_cache
+                        .borrow_mut()
+                        .insert(page_num, Page::load(page_raw)),
                     Err(why) => {
                         println!("Unable to read file: {why}");
                         exit(-1);
                     }
                 };
             } else {
-                self.pages[page_num] = Some(Page::new());
+                self.page_cache.borrow_mut().insert(page_num, Page::new());
+                self.num_pages.set(self.num_pages.get() + 1);
             }
         }
 
-        let mut node = Node::try_from(self.pages[page_num].as_ref().unwrap()).unwrap();
+        let mut node = Node::try_from(self.page_cache.borrow().get(&page_num).unwrap()).unwrap();
         node.page_num = page_num;
         node
     }
 
     pub fn commit_page(&mut self, n: &Node<usize, Row>) {
-        if n.page_num < self.pages.len() {
+        if n.page_num < self.num_pages.get() {
             let new_page = Page::try_from(n).unwrap();
-            self.pages[n.page_num] = Some(new_page);
+            self.page_cache.borrow_mut().insert(n.page_num, new_page);
         }
     }
 
     pub fn close(&mut self) {
-        for i in 0..self.pages.len() {
-            let page = self.pages[i].as_mut();
+        for i in 0..self.num_pages.get() {
+            let map = self.page_cache.get_mut();
+            let page = map.get_mut(&i);
             self.file
+                .borrow_mut()
                 .seek(SeekFrom::Start(0))
                 .expect("Seeking start of the file");
-            match page.map(|page| page.write(self.file.borrow_mut())) {
+            match page.map(|page| page.write(self.file.borrow_mut().deref())) {
                 Some(Ok(bytes_written)) => {
-                    if i < self.pages.len() - 1 {
+                    if i < self.num_pages.get() - 1 {
                         self.file
+                            .borrow_mut()
                             .seek(SeekFrom::Current(
                                 (PAGE_SIZE as usize - bytes_written) as i64,
                             ))
@@ -112,12 +114,16 @@ impl Pager {
                 }
                 None => {
                     self.file
+                        .borrow_mut()
                         .seek(SeekFrom::Current(PAGE_SIZE as i64))
                         .expect("Page size seek forward");
                 }
             }
         }
-        self.file.flush().expect("Flushing writes to file")
+        self.file
+            .borrow_mut()
+            .flush()
+            .expect("Flushing writes to file")
     }
 
     pub fn file_length(&self) -> usize {
@@ -125,7 +131,7 @@ impl Pager {
     }
 
     pub fn num_pages(&self) -> usize {
-        self.pages.len()
+        self.num_pages.get()
     }
 }
 

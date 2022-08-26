@@ -93,8 +93,8 @@ impl Table {
         self.root_page_num
     }
 
-    // pub fn get_page(&mut self, page_num: usize) -> &mut Node<usize, Row> {
-    //     self.pager.get_page(page_num)
+    // pub fn find(&self, key: usize) -> Cursor {
+    //     let mut c = Cursor::start(&mut self.btree);
     // }
 
     pub fn get_root_page_num(&self) -> usize {

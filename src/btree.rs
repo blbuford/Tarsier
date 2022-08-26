@@ -93,72 +93,18 @@ impl<K, V> Node<K, V> {
     }
 
     pub fn insert(&mut self, cell_num: usize, key: K, value: V) -> bool {
-        if let NodeType::Leaf(ref mut cells) = self.node_type {
-            if cells.len() >= 12 {
-                return false;
+        match self.node_type {
+            NodeType::Leaf(ref mut cells) => {
+                if cells.len() >= 12 {
+                    return false;
+                }
+                cells.insert(cell_num, KeyValuePair { key, value });
+                self.num_cells += 1;
+                return true;
             }
-            cells.insert(cell_num, KeyValuePair { key, value });
-            self.num_cells += 1;
-            return true;
+            _ => todo!(),
         }
 
         false
     }
 }
-//
-// struct Page {
-//     data: Box<[u8; NODE_SIZE]>,
-// }
-//
-// impl Page {
-//     pub fn is_root_node(&self) -> bool {
-//         self.data[IS_ROOT_OFFSET] == 1
-//     }
-//     pub fn parent_offset(&self) -> Option<usize> {
-//         Some(u32::from_ne_bytes(
-//             self.data[PARENT_OFFSET..PARENT_OFFSET + 4]
-//                 .try_into()
-//                 .unwrap(),
-//         ) as usize)
-//     }
-//     pub fn num_cells(&self) -> usize {
-//         u32::from_ne_bytes(
-//             self.data[NUM_CELLS_OFFSET..NUM_CELLS_OFFSET + 4]
-//                 .try_into()
-//                 .unwrap(),
-//         ) as usize
-//     }
-// }
-//
-// impl TryFrom<Page> for Node<usize, Row> {
-//     type Error = ();
-//
-//     fn try_from(value: Page) -> Result<Self, Self::Error> {
-//         let mut node = Node::new();
-//         node.is_root = value.is_root_node();
-//         if !node.is_root {
-//             node.parent_offset = value.parent_offset();
-//         }
-//         node.num_cells = value.num_cells();
-//
-//         match node.node_type {
-//             NodeType::Leaf(ref mut cells) => {
-//                 for i in 0..12 as usize {
-//                     if i == node.num_cells {
-//                         break;
-//                     }
-//                     let cell_key = CELL_OFFSET + (i * CELL_SIZE);
-//                     let cell_val = cell_key + CELL_KEY_SIZE;
-//                     let key =
-//                         u32::from_ne_bytes(value.data[cell_key..cell_key + 4].try_into().unwrap())
-//                             as usize;
-//                     let value = Row::deserialize(&value.data[cell_val..cell_val + CELL_VALUE_SIZE]);
-//                     cells.push(KeyValuePair { key, value })
-//                 }
-//             }
-//             _ => todo!(),
-//         }
-//
-//         Ok(node)
-//     }
-// }
