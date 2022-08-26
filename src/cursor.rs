@@ -19,17 +19,6 @@ impl Cursor {
         }
     }
 
-    pub fn end(tree: &BTree) -> Self {
-        let root = tree.root();
-        let page_num = root.page_num;
-        let cell_num = root.num_cells;
-        Self {
-            page_num,
-            cell_num,
-            end_of_table: true,
-        }
-    }
-
     pub fn new(page_num: usize, cell_num: usize, end_of_table: bool) -> Self {
         Self {
             page_num,

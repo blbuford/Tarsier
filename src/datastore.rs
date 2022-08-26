@@ -302,4 +302,33 @@ mod tests {
             ExecuteResult::TableFull
         );
     }
+
+    #[test]
+    fn table_sorted_key_order() {
+        let mut table = open_test_db();
+        for i in (0..12 as u32).rev() {
+            assert_eq!(
+                table.execute_statement(Statement {
+                    statement_type: StatementType::Insert,
+                    row_to_insert: Some(Row {
+                        id: i,
+                        username: String::from(format!("user{i}")),
+                        email: String::from(format!("user{i}@example.com")),
+                    }),
+                }),
+                ExecuteResult::InsertSuccess
+            );
+        }
+        if let ExecuteResult::SelectSuccess(rows) = table.execute_statement(Statement {
+            statement_type: StatementType::Select,
+            row_to_insert: None,
+        }) {
+            for (idx, row) in rows.iter().enumerate() {
+                println!("{idx}");
+                assert_eq!(row.id, idx as u32);
+            }
+        } else {
+            panic!()
+        }
+    }
 }

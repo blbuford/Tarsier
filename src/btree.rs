@@ -48,7 +48,7 @@ impl BTree {
 
     pub fn insert(&mut self, cursor: &Cursor, value: Row) -> bool {
         let mut node = self.pager.get_page(cursor.page_num());
-        if node.insert(cursor.cell_num(), cursor.cell_num(), value) {
+        if node.insert(cursor.cell_num(), value.id as usize, value) {
             self.pager.commit_page(&node);
             if node.is_root {
                 self.root = node;
