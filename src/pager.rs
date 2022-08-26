@@ -220,7 +220,7 @@ impl TryFrom<&Page> for Node<usize, Row> {
     type Error = ();
 
     fn try_from(value: &Page) -> Result<Self, Self::Error> {
-        let mut node = Node::new();
+        let mut node = Node::leaf();
         node.is_root = value.is_root_node();
         if !node.is_root {
             node.parent_offset = value.parent_offset();

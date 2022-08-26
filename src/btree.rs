@@ -48,14 +48,21 @@ impl BTree {
 
     pub fn insert(&mut self, cursor: &Cursor, value: Row) -> bool {
         let mut node = self.pager.get_page(cursor.page_num());
-        if node.insert(cursor.cell_num(), value.id as usize, value) {
-            self.pager.commit_page(&node);
-            if node.is_root {
-                self.root = node;
+        if node.num_cells >= 12 {
+            let mut new_node = node.split(self.pager.num_pages());
+            let mut new_parent = Node::internal();
+
+            return false;
+        } else {
+            if node.insert(cursor.cell_num(), value.id as usize, value) {
+                self.pager.commit_page(&node);
+                if node.is_root {
+                    self.root = node;
+                }
+                return true;
             }
-            return true;
+            return false;
         }
-        return false;
     }
 
     pub fn root(&self) -> &Node<usize, Row> {
@@ -95,10 +102,32 @@ pub struct Node<K: Ord, V> {
 }
 
 impl<K: Ord, V> Node<K, V> {
-    pub fn new() -> Self {
+    pub fn leaf() -> Self {
         Self {
             is_root: false,
             node_type: NodeType::Leaf(Vec::new()),
+            parent_offset: None,
+            num_cells: 0,
+            page_num: 0,
+        }
+    }
+
+    pub fn leaf_with_children(children: impl Iterator<Item = KeyValuePair<K, V>>) -> Self {
+        let children = Vec::from_iter(children);
+        let num_cells = children.len();
+        Self {
+            is_root: false,
+            node_type: NodeType::Leaf(children),
+            parent_offset: None,
+            num_cells,
+            page_num: 0,
+        }
+    }
+
+    pub fn internal() -> Self {
+        Self {
+            is_root: false,
+            node_type: NodeType::Internal,
             parent_offset: None,
             num_cells: 0,
             page_num: 0,
@@ -141,5 +170,15 @@ impl<K: Ord, V> Node<K, V> {
             }
             _ => todo!(),
         }
+    }
+
+    pub fn split(&mut self, new_page_num: usize) -> Node<K, V> {
+        if let NodeType::Leaf(ref mut cells) = self.node_type {
+            let upper = cells.split_off(cells.len() / 2);
+            let mut new_node = Node::leaf_with_children(upper.into_iter());
+            new_node.page_num = new_page_num;
+            return new_node;
+        }
+        todo!()
     }
 }
