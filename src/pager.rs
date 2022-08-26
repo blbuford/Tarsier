@@ -1,9 +1,3 @@
-use crate::btree::{
-    KeyValuePair, Node, NodeType, CELL_KEY_SIZE, CELL_OFFSET, CELL_SIZE, CELL_VALUE_SIZE,
-    IS_ROOT_OFFSET, NUM_CELLS_OFFSET, PARENT_OFFSET,
-};
-use crate::datastore::ROW_SIZE;
-use crate::Row;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -12,6 +6,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::path::Path;
 use std::process::exit;
+
+use crate::btree::{
+    KeyValuePair, Node, NodeType, CELL_KEY_SIZE, CELL_OFFSET, CELL_SIZE, CELL_VALUE_SIZE,
+    IS_ROOT_OFFSET, NUM_CELLS_OFFSET, PARENT_OFFSET,
+};
+use crate::datastore::ROW_SIZE;
+use crate::Row;
 
 pub const PAGE_SIZE: usize = 4096;
 pub const TABLE_MAX_PAGES: usize = 100;
@@ -136,6 +137,7 @@ impl Pager {
 }
 
 pub struct Page(Box<Box<[u8; PAGE_SIZE as usize]>>);
+
 impl Page {
     pub fn new() -> Self {
         Self(Box::new(Box::new([0 as u8; PAGE_SIZE as usize])))

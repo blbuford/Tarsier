@@ -41,14 +41,14 @@ impl BTree {
         Self { root, pager }
     }
 
-    pub fn get(&mut self, page_num: usize, cell_num: usize) -> Row {
+    pub fn get(&self, page_num: usize, cell_num: usize) -> Row {
         let node = self.pager.get_page(page_num);
         node.get(cell_num).as_ref().unwrap().value.clone()
     }
 
-    pub fn insert(&mut self, page_num: usize, cell_num: usize, value: Row) -> bool {
-        let mut node = self.pager.get_page(page_num);
-        if node.insert(cell_num, cell_num, value) {
+    pub fn insert(&mut self, cursor: &Cursor, value: Row) -> bool {
+        let mut node = self.pager.get_page(cursor.page_num());
+        if node.insert(cursor.cell_num(), cursor.cell_num(), value) {
             self.pager.commit_page(&node);
             if node.is_root {
                 self.root = node;
@@ -66,6 +66,7 @@ impl BTree {
         self.pager.close()
     }
 }
+
 pub struct Node<K, V> {
     pub(crate) is_root: bool,
     pub(crate) node_type: NodeType<K, V>,

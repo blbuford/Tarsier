@@ -1,9 +1,10 @@
-use crate::btree::{BTree, Node};
-use crate::cursor::Cursor;
-use crate::pager::{Page, Pager, PAGE_SIZE, TABLE_MAX_PAGES};
-use crate::{Statement, StatementType};
 use std::fmt::Formatter;
 use std::path::Path;
+
+use crate::btree::BTree;
+use crate::cursor::Cursor;
+use crate::pager::{Pager, PAGE_SIZE, TABLE_MAX_PAGES};
+use crate::{Statement, StatementType};
 
 pub const ROW_SIZE: usize = 291;
 pub const ROWS_PER_PAGE: usize = PAGE_SIZE as usize / ROW_SIZE;
@@ -15,6 +16,7 @@ pub enum ExecuteResult {
     SelectSuccess(Vec<Row>),
     TableFull,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub id: u32,
@@ -62,18 +64,16 @@ impl Row {
 
 pub struct Table {
     root_page_num: usize,
-    // pager: Pager,
     btree: BTree,
 }
 
 impl Table {
     pub fn open(filename: impl AsRef<Path>) -> Self {
-        let mut pager = Pager::open(filename);
-        let mut btree = BTree::new(pager);
+        let pager = Pager::open(filename);
+        let btree = BTree::new(pager);
 
         Table {
             root_page_num: 0,
-            // pager,
             btree,
         }
     }
@@ -101,21 +101,21 @@ impl Table {
         self.root_page_num
     }
     fn execute_insert(&mut self, row: Row) -> ExecuteResult {
-        let mut cursor = Cursor::end(&mut self.btree);
-        if !cursor.insert_at(row) {
+        let cursor = Cursor::end(&self.btree);
+        if !self.btree.insert(&cursor, row) {
             return ExecuteResult::TableFull;
         }
 
         ExecuteResult::InsertSuccess
     }
 
-    fn execute_select(&mut self) -> ExecuteResult {
+    fn execute_select(&self) -> ExecuteResult {
         let mut rows = Vec::new();
-        let mut cursor = Cursor::start(&mut self.btree);
+        let mut cursor = Cursor::start(&self.btree);
         while !cursor.is_at_end_of_table() {
-            let row = cursor.value();
+            let row = cursor.value(&self.btree);
             rows.push(row.clone());
-            cursor.advance();
+            cursor.advance(&self.btree);
         }
         ExecuteResult::SelectSuccess(rows)
     }
@@ -123,9 +123,11 @@ impl Table {
 
 #[cfg(test)]
 mod tests {
-    use crate::datastore::{Page, TABLE_MAX_ROWS};
-    use crate::{ExecuteResult, Row, Statement, StatementType, Table};
     use std::fs::OpenOptions;
+
+    use crate::datastore::TABLE_MAX_ROWS;
+    use crate::pager::Page;
+    use crate::{ExecuteResult, Row, Statement, StatementType, Table};
 
     fn open_test_db() -> Table {
         let test_db = OpenOptions::new()
@@ -136,6 +138,7 @@ mod tests {
         test_db.sync_all().expect("sync changes to disk");
         Table::open("test.db")
     }
+
     #[test]
     fn serialize_tests() {
         let r = Row {
