@@ -1,6 +1,7 @@
 use crate::btree::BTree;
 use crate::Row;
 
+#[derive(Debug)]
 pub struct Cursor {
     page_num: usize,
     cell_num: usize,

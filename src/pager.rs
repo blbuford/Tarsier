@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::exit;
 
 use crate::btree::{
-    KeyValuePair, Node, NodeType, CELL_KEY_SIZE, CELL_OFFSET, CELL_SIZE, CELL_VALUE_SIZE,
+    Child, KeyValuePair, Node, NodeType, CELL_KEY_SIZE, CELL_OFFSET, CELL_SIZE, CELL_VALUE_SIZE,
     IS_ROOT_OFFSET, NUM_CELLS_OFFSET, PARENT_OFFSET,
 };
 use crate::datastore::ROW_SIZE;
@@ -16,7 +16,9 @@ use crate::Row;
 
 pub const PAGE_SIZE: usize = 4096;
 pub const TABLE_MAX_PAGES: usize = 100;
-
+pub const RIGHTMOST_CHILD_OFFSET: usize = 10;
+pub const INTERNAL_CHILDREN_OFFSET: usize = RIGHTMOST_CHILD_OFFSET + 4;
+pub const INTERNAL_CHILD_SIZE: usize = 12;
 #[derive(Debug)]
 pub struct Pager {
     file: RefCell<File>,
@@ -84,9 +86,17 @@ impl Pager {
     }
 
     pub fn commit_page(&mut self, n: &Node<usize, Row>) {
-        if n.page_num < self.num_pages.get() {
-            let new_page = Page::try_from(n).unwrap();
-            self.page_cache.borrow_mut().insert(n.page_num, new_page);
+        match Page::try_from(n) {
+            Ok(new_page) => {
+                if n.page_num > self.num_pages.get() {
+                    self.num_pages.set(n.page_num + 1);
+                }
+                self.page_cache.borrow_mut().insert(n.page_num, new_page);
+            }
+            Err(_) => {
+                println!("Unable to commit page {}", n.page_num);
+                exit(-1);
+            }
         }
     }
 
@@ -202,6 +212,31 @@ impl Page {
             .swap_with_slice(&mut (num_cells as u32).to_ne_bytes());
     }
 
+    pub fn rightmost_child(&self) -> usize {
+        u32::from_ne_bytes(
+            self.0[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    pub fn set_rightmost_child(&mut self, rightmost_child: usize) {
+        self.0[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 4]
+            .swap_with_slice(&mut (rightmost_child as u32).to_ne_bytes());
+    }
+
+    pub fn set_internal_child(&mut self, child: &Child<usize>, slot: usize) {
+        let child_left = INTERNAL_CHILDREN_OFFSET + (slot * INTERNAL_CHILD_SIZE);
+        let child_key = child_left + 4;
+        let child_right = child_key + 4;
+        self.0[child_left..child_left + 4]
+            .swap_with_slice(&mut (child.left().unwrap_or(u32::MAX as usize) as u32).to_ne_bytes());
+        self.0[child_key..child_key + 4].swap_with_slice(&mut (*child.key() as u32).to_ne_bytes());
+        self.0[child_right..child_right + 4].swap_with_slice(
+            &mut (child.right().unwrap_or(u32::MAX as usize) as u32).to_ne_bytes(),
+        );
+    }
+
     pub fn set_cell(&mut self, cell_num: usize, key: usize, value: &Row) {
         let cell_key = CELL_OFFSET + (cell_num * CELL_SIZE);
         let cell_val = cell_key + CELL_KEY_SIZE;
@@ -242,7 +277,31 @@ impl TryFrom<&Page> for Node<usize, Row> {
                     cells.push(KeyValuePair { key, value })
                 }
             }
-            _ => todo!(),
+            NodeType::Internal(ref mut children) => {
+                let rightmost = value.rightmost_child();
+                for slot in 0..=rightmost {
+                    let child_left = INTERNAL_CHILDREN_OFFSET + (slot * INTERNAL_CHILD_SIZE);
+                    let child_key = child_left + 4;
+                    let child_right = child_key + 4;
+                    let mut child = Child::new(u32::from_ne_bytes(
+                        value.0[child_key..child_key + 4].try_into().unwrap(),
+                    ) as usize);
+
+                    let left =
+                        u32::from_ne_bytes(value.0[child_left..child_left + 4].try_into().unwrap());
+                    if left != u32::MAX {
+                        child.set_left(Some(left as usize));
+                    }
+
+                    let right = u32::from_ne_bytes(
+                        value.0[child_right..child_right + 4].try_into().unwrap(),
+                    );
+                    if right != u32::MAX {
+                        child.set_right(Some(right as usize));
+                    }
+                    children.insert(child);
+                }
+            }
         }
 
         Ok(node)
@@ -266,7 +325,12 @@ impl TryFrom<&Node<usize, Row>> for Page {
                     i += 1;
                 }
             }
-            _ => todo!(),
+            NodeType::Internal(ref children) => {
+                page.set_rightmost_child(children.len() - 1);
+                for (slot, child) in children.iter().enumerate() {
+                    page.set_internal_child(child, slot)
+                }
+            }
         }
 
         Ok(page)

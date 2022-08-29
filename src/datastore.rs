@@ -105,6 +105,7 @@ impl Table {
         match self.find(row.id as usize) {
             Ok(_duplicate_location) => ExecuteResult::DuplicateKey,
             Err(cursor) => {
+                dbg!(&cursor);
                 if cursor.page_num() == usize::MAX {
                     return ExecuteResult::TableFull;
                 }
@@ -140,6 +141,7 @@ mod tests {
         let test_db = OpenOptions::new()
             .write(true)
             .truncate(true)
+            .create(true)
             .open("test.db")
             .expect("test database");
         test_db.sync_all().expect("sync changes to disk");
@@ -276,7 +278,7 @@ mod tests {
     #[test]
     fn table_insert_max_rows() {
         let mut table = open_test_db();
-        for i in 0..12 {
+        for i in 0..13 {
             assert_eq!(
                 table.execute_statement(Statement {
                     statement_type: StatementType::Insert,
