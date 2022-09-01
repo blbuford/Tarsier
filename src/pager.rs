@@ -22,7 +22,6 @@ pub const INTERNAL_CHILD_SIZE: usize = 12;
 #[derive(Debug)]
 pub struct Pager {
     file: RefCell<File>,
-    file_length: u64,
     num_pages: Cell<usize>,
     page_cache: RefCell<HashMap<usize, Page>>,
 }
@@ -44,7 +43,6 @@ impl Pager {
                 let num_pages = Cell::new(file_length as usize / PAGE_SIZE);
                 Self {
                     file: RefCell::new(file),
-                    file_length,
                     num_pages,
                     page_cache: RefCell::new(HashMap::new()),
                 }
@@ -137,10 +135,6 @@ impl Pager {
             .expect("Flushing writes to file")
     }
 
-    pub fn file_length(&self) -> usize {
-        self.file_length as usize
-    }
-
     pub fn num_pages(&self) -> usize {
         self.num_pages.get()
     }
@@ -229,11 +223,22 @@ impl Page {
         let child_left = INTERNAL_CHILDREN_OFFSET + (slot * INTERNAL_CHILD_SIZE);
         let child_key = child_left + 4;
         let child_right = child_key + 4;
-        self.0[child_left..child_left + 4]
-            .swap_with_slice(&mut (child.left().unwrap_or(u32::MAX as usize) as u32).to_ne_bytes());
+        self.0[child_left..child_left + 4].swap_with_slice(
+            &mut (child
+                .left()
+                .as_ref()
+                .unwrap_with_or(|n| n.page_num.clone(), u32::MAX as usize)
+                as u32)
+                .to_ne_bytes(),
+        );
         self.0[child_key..child_key + 4].swap_with_slice(&mut (*child.key() as u32).to_ne_bytes());
         self.0[child_right..child_right + 4].swap_with_slice(
-            &mut (child.right().unwrap_or(u32::MAX as usize) as u32).to_ne_bytes(),
+            &mut (child
+                .right()
+                .as_ref()
+                .unwrap_with_or(|n| n.page_num.clone(), u32::MAX as usize)
+                as u32)
+                .to_ne_bytes(),
         );
     }
 
@@ -283,22 +288,21 @@ impl TryFrom<&Page> for Node<usize, Row> {
                     let child_left = INTERNAL_CHILDREN_OFFSET + (slot * INTERNAL_CHILD_SIZE);
                     let child_key = child_left + 4;
                     let child_right = child_key + 4;
-                    let mut child = Child::new(u32::from_ne_bytes(
-                        value.0[child_key..child_key + 4].try_into().unwrap(),
-                    ) as usize);
 
                     let left =
-                        u32::from_ne_bytes(value.0[child_left..child_left + 4].try_into().unwrap());
-                    if left != u32::MAX {
-                        child.set_left(Some(left as usize));
-                    }
+                        u32::from_ne_bytes(value.0[child_left..child_left + 4].try_into().unwrap())
+                            as usize;
 
                     let right = u32::from_ne_bytes(
                         value.0[child_right..child_right + 4].try_into().unwrap(),
+                    ) as usize;
+
+                    let child = Child::new(
+                        u32::from_ne_bytes(value.0[child_key..child_key + 4].try_into().unwrap())
+                            as usize,
+                        left,
+                        right,
                     );
-                    if right != u32::MAX {
-                        child.set_right(Some(right as usize));
-                    }
                     children.insert(child);
                 }
             }

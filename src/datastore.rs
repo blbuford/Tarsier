@@ -64,7 +64,6 @@ impl Row {
 }
 
 pub struct Table {
-    root_page_num: usize,
     btree: BTree,
 }
 
@@ -73,10 +72,7 @@ impl Table {
         let pager = Pager::open(filename);
         let btree = BTree::new(pager);
 
-        Table {
-            root_page_num: 0,
-            btree,
-        }
+        Table { btree }
     }
 
     pub fn execute_statement(&mut self, stmt: Statement) -> ExecuteResult {
@@ -90,17 +86,10 @@ impl Table {
         self.btree.close()
     }
 
-    pub fn root_page_num(&self) -> usize {
-        self.root_page_num
-    }
-
     pub fn find(&self, key: usize) -> Result<Cursor, Cursor> {
         self.btree.find(key)
     }
 
-    pub fn get_root_page_num(&self) -> usize {
-        self.root_page_num
-    }
     fn execute_insert(&mut self, row: Row) -> ExecuteResult {
         match self.find(row.id as usize) {
             Ok(_duplicate_location) => ExecuteResult::DuplicateKey,

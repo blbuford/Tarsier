@@ -1,8 +1,11 @@
+use crate::btree::Fetchable::{Fetched, Unfetched};
 use crate::cursor::Cursor;
 use crate::pager::Pager;
 use crate::Row;
+use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, Bound};
+use std::ops::RangeBounds;
 
 pub const NODE_SIZE: usize = 4096;
 pub const NODE_TYPE_OFFSET: usize = 0;
@@ -21,32 +24,89 @@ pub struct KeyValuePair<K, V> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Child<K: Ord + PartialEq + Eq> {
-    key: K,
-    left: Option<usize>,
-    right: Option<usize>,
+pub enum Fetchable<T> {
+    Fetched(T),
+    Unfetched(usize),
 }
 
-impl<K: Ord + PartialEq + Eq> Child<K> {
-    pub fn new(key: K) -> Self {
-        Self {
-            key,
-            left: None,
-            right: None,
+impl<T> Fetchable<T> {
+    pub fn map<U, F>(self, f: F) -> Fetchable<U>
+    where
+        F: FnOnce(T) -> U,
+    {
+        match self {
+            Fetched(x) => Fetched(f(x)),
+            Unfetched(x) => Unfetched(x),
         }
     }
 
-    pub fn left(&self) -> Option<usize> {
-        self.left
+    pub fn unwrap(self) -> T {
+        match self {
+            Fetched(x) => x,
+            Unfetched(_) => panic!("called `Fetchable::unwrap()` on an `Unfetched` value"),
+        }
     }
-    pub fn set_left(&mut self, l: Option<usize>) {
-        self.left = l
+    pub fn unwrap_or(self, default: T) -> T {
+        match self {
+            Fetched(x) => x,
+            Unfetched(_) => default,
+        }
     }
-    pub fn right(&self) -> Option<usize> {
-        self.right
+
+    pub fn unwrap_with_or<U, F>(self, f: F, default: U) -> U
+    where
+        F: FnOnce(T) -> U,
+    {
+        match self {
+            Fetched(x) => f(x),
+            Unfetched(_) => default,
+        }
     }
-    pub fn set_right(&mut self, r: Option<usize>) {
-        self.right = r
+
+    pub fn as_ref(&self) -> Fetchable<&T> {
+        match *self {
+            Fetched(ref x) => Fetched(x),
+            Unfetched(p) => Unfetched(p),
+        }
+    }
+}
+
+/// Child struct to represent internal node keys, and nodes to their left/right
+/// Left/right are Option<T> to indicate whether they have been fetched or not. It is assumed that they exist
+#[derive(Debug, Clone)]
+pub struct Child<K: Ord + PartialEq + Eq> {
+    key: K,
+    left: RefCell<Fetchable<Node<usize, Row>>>,
+    right: RefCell<Fetchable<Node<usize, Row>>>,
+}
+
+impl<K: Ord + PartialEq + Eq> Child<K> {
+    pub fn new(key: K, left_page: usize, right_page: usize) -> Self {
+        Self {
+            key,
+            left: RefCell::new(Unfetched(left_page)),
+            right: RefCell::new(Unfetched(right_page)),
+        }
+    }
+
+    pub fn left(&self) -> Ref<Fetchable<Node<usize, Row>>> {
+        self.left.borrow()
+    }
+
+    pub fn left_mut(&self) -> RefMut<Fetchable<Node<usize, Row>>> {
+        self.left.borrow_mut()
+    }
+    pub fn set_left(&self, n: Node<usize, Row>) {
+        self.left.replace(Fetched(n));
+    }
+    pub fn right(&self) -> Ref<Fetchable<Node<usize, Row>>> {
+        self.right.borrow()
+    }
+    pub fn right_mut(&self) -> RefMut<Fetchable<Node<usize, Row>>> {
+        self.right.borrow_mut()
+    }
+    pub fn set_right(&self, n: Node<usize, Row>) {
+        self.right.replace(Fetched(n));
     }
     pub fn key(&self) -> &K {
         &self.key
@@ -73,6 +133,24 @@ impl<K: Ord + PartialEq + Eq> Ord for Child<K> {
     }
 }
 
+impl<K: Ord + PartialEq + Eq + RangeBounds<K>> RangeBounds<K> for Child<K> {
+    fn start_bound(&self) -> Bound<&K> {
+        self.key.start_bound()
+    }
+
+    fn end_bound(&self) -> Bound<&K> {
+        self.key.end_bound()
+    }
+
+    fn contains<U>(&self, item: &U) -> bool
+    where
+        K: PartialOrd<U>,
+        U: ?Sized + PartialOrd<K>,
+    {
+        self.key.contains(item)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum NodeType<K: Ord, V> {
     Internal(BTreeSet<Child<K>>),
@@ -80,7 +158,7 @@ pub enum NodeType<K: Ord, V> {
 }
 
 pub struct BTree {
-    root: Node<usize, Row>,
+    root: RefCell<Node<usize, Row>>,
     pager: Pager,
 }
 
@@ -95,7 +173,10 @@ impl BTree {
             pager.get_page(0)
         };
 
-        Self { root, pager }
+        Self {
+            root: RefCell::new(root),
+            pager,
+        }
     }
 
     pub fn get(&self, page_num: usize, cell_num: usize) -> Row {
@@ -106,7 +187,7 @@ impl BTree {
     pub fn insert(&mut self, cursor: &Cursor, value: Row) -> bool {
         let mut node = self.pager.get_page(cursor.page_num());
         // TODO: Check this node's parent offset for an internal node. If exists, split all of its children to maintain B+-Tree height property
-        if node.num_cells >= 12 {
+        return if node.num_cells >= 12 {
             let mut new_node = node.split(self.pager.num_pages());
             let mut new_parent: Node<usize, Row> = Node::internal();
             new_parent.page_num = self.pager.num_pages() + 1;
@@ -114,41 +195,46 @@ impl BTree {
             std::mem::swap(&mut node.is_root, &mut new_parent.is_root);
             node.parent_offset = Some(new_parent.page_num);
             new_node.parent_offset = Some(new_parent.page_num);
-            let lower_largest_key = node.largest_key().unwrap();
-            let mut child_record = Child::new(lower_largest_key.clone());
-            child_record.set_left(Some(node.page_num));
-            child_record.set_right(Some(new_node.page_num));
-            if !new_parent.insert_internal_child(child_record) {
-                panic!()
-            }
-            match value.id.cmp(&(*lower_largest_key as u32)) {
+            let lower_largest_key = node.largest_key().unwrap().clone();
+            let child_record =
+                Child::new(lower_largest_key.clone(), node.page_num, new_node.page_num);
+
+            match value.id.cmp(&(lower_largest_key as u32)) {
                 Ordering::Less => node.insert(0, value.id as usize, value),
                 Ordering::Greater => new_node.insert(0, value.id as usize, value),
                 _ => panic!(),
             };
-            self.pager.commit_page(&new_parent);
-            self.pager.commit_page(&new_node);
+
             self.pager.commit_page(&node);
+            child_record.set_left(node);
+            self.pager.commit_page(&new_node);
+            child_record.set_right(new_node);
+
+            if !new_parent.insert_internal_child(child_record) {
+                panic!()
+            }
+            self.pager.commit_page(&new_parent);
 
             if new_parent.is_root {
-                self.root = new_parent;
+                self.root.replace(new_parent);
             }
 
-            return true;
+            true
         } else {
             if node.insert(cursor.cell_num(), value.id as usize, value) {
                 self.pager.commit_page(&node);
                 if node.is_root {
-                    self.root = node;
+                    self.root.replace(node);
                 }
-                return true;
+                true
+            } else {
+                false
             }
-            return false;
-        }
+        };
     }
 
-    pub fn root(&self) -> &Node<usize, Row> {
-        &self.root
+    pub fn root(&self) -> Ref<Node<usize, Row>> {
+        self.root.borrow()
     }
 
     pub fn close(&mut self) {
@@ -156,39 +242,55 @@ impl BTree {
     }
 
     pub fn find(&self, k: usize) -> Result<Cursor, Cursor> {
-        let mut current = self.root.clone();
-        if let NodeType::Internal(ref children) = current.node_type {
-            let mut last_right = None;
-            for Child { key, left, right } in children {
-                match k.cmp(key) {
-                    Ordering::Greater => {
-                        last_right = right.as_ref();
-                        continue;
-                    }
-                    _ => {
-                        if let Some(left) = left {
-                            current = self.pager.get_page(*left)
-                        }
-                    }
-                };
+        self._find(k, self.root.borrow())
+    }
+    fn _find(&self, k: usize, node: Ref<Node<usize, Row>>) -> Result<Cursor, Cursor> {
+        if let NodeType::Internal(ref children) = node.node_type {
+            let child = match children.range(..=Child::new(k, 0, 0)).next_back() {
+                Some(c) => Some(c),
+                None => children.iter().next(),
             }
+            .unwrap();
+            let mut uf = usize::MAX;
+            let n = match k.cmp(child.key()) {
+                Ordering::Greater => {
+                    if let Unfetched(page_num) = *child.right() {
+                        uf = page_num;
+                    }
+                    if uf != usize::MAX {
+                        child.set_right(self.pager.get_page(uf))
+                    }
+                    child.right()
+                }
+                _ => {
+                    if let Unfetched(page_num) = *child.left() {
+                        uf = page_num;
+                    }
+                    if uf != usize::MAX {
+                        child.set_left(self.pager.get_page(uf))
+                    }
+                    child.left()
+                }
+            };
+
+            self._find(k, Ref::map(n, |f| f.as_ref().unwrap()))
+        } else {
+            node.find(k)
+                .map(|(page_num, cell_num)| {
+                    Cursor::new(
+                        page_num,
+                        cell_num,
+                        (self.pager.num_pages() - 1) == page_num && cell_num >= 12,
+                    )
+                })
+                .map_err(|(page_num, insert_cell_num)| {
+                    Cursor::new(
+                        page_num,
+                        insert_cell_num,
+                        (self.pager.num_pages() - 1) == page_num && insert_cell_num >= 12,
+                    )
+                })
         }
-        current
-            .find(k)
-            .map(|(page_num, cell_num)| {
-                Cursor::new(
-                    page_num,
-                    cell_num,
-                    (self.pager.num_pages() - 1) == page_num && cell_num >= 12,
-                )
-            })
-            .map_err(|(page_num, insert_cell_num)| {
-                Cursor::new(
-                    page_num,
-                    insert_cell_num,
-                    (self.pager.num_pages() - 1) == page_num && insert_cell_num >= 12,
-                )
-            })
     }
 }
 
@@ -251,10 +353,8 @@ impl<K: Ord, V> Node<K, V> {
                 self.num_cells += 1;
                 return true;
             }
-            NodeType::Internal(ref children) => {}
+            _ => panic!(),
         }
-
-        false
     }
 
     pub fn find(&self, k: K) -> Result<(usize, usize), (usize, usize)> {
@@ -281,8 +381,9 @@ impl<K: Ord, V> Node<K, V> {
             new_node.page_num = new_page_num;
             self.num_cells = cells.len();
             return new_node;
+        } else {
+            panic!()
         }
-        todo!()
     }
 
     pub fn largest_key(&self) -> Option<&K> {
@@ -299,5 +400,40 @@ impl<K: Ord, V> Node<K, V> {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::btree::Child;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn child_tree_shananigans() {
+        let mut bt = BTreeSet::new();
+        bt.insert(Child::new(4 as usize, 1, 2));
+        bt.insert(Child::new(9 as usize, 2, 3));
+        let smallest = match bt.range(..=Child::new(5, 0, 0)).next_back() {
+            Some(c) => Some(c),
+            None => bt.iter().next(),
+        };
+
+        assert!(smallest.is_some());
+        assert_eq!(*smallest.unwrap().key(), 4);
+
+        let largest = match bt.range(..=Child::new(10, 0, 0)).next_back() {
+            Some(c) => Some(c),
+            None => bt.iter().next(),
+        };
+
+        assert!(largest.is_some());
+        assert_eq!(*largest.unwrap().key(), 9);
+
+        let equiv = match bt.range(..=Child::new(9, 0, 0)).next_back() {
+            Some(c) => Some(c),
+            None => bt.iter().next(),
+        };
+        assert!(equiv.is_some());
+        assert_eq!(*equiv.unwrap().key(), 9);
     }
 }
