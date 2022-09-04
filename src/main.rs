@@ -1,20 +1,26 @@
 extern crate core;
 
-mod btree;
-mod cursor;
-mod datastore;
-mod pager;
-
-use crate::datastore::{ExecuteResult, Row, Table};
-use regex::Regex;
 use std::io;
 use std::io::Write;
 use std::process::exit;
+
+use regex::Regex;
+
+use crate::datastore::{ExecuteResult, Row, Table};
+
+mod btree;
+mod cursor;
+mod datastore;
+mod fetchable;
+mod node;
+mod node_type;
+mod pager;
 
 enum MetaCommand {
     Success,
     UnrecognizedCommand,
 }
+
 enum PrepareResult {
     Success(Statement),
     UnrecognizedStatement,
@@ -22,6 +28,7 @@ enum PrepareResult {
     NegativeId,
     StringTooLong,
 }
+
 pub enum StatementType {
     Insert,
     Select,

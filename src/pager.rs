@@ -8,10 +8,12 @@ use std::path::Path;
 use std::process::exit;
 
 use crate::btree::{
-    Child, KeyValuePair, Node, NodeType, CELL_KEY_SIZE, CELL_OFFSET, CELL_SIZE, CELL_VALUE_SIZE,
-    IS_ROOT_OFFSET, NUM_CELLS_OFFSET, PARENT_OFFSET,
+    CELL_KEY_SIZE, CELL_OFFSET, CELL_SIZE, CELL_VALUE_SIZE, IS_ROOT_OFFSET, NUM_CELLS_OFFSET,
+    PARENT_OFFSET,
 };
 use crate::datastore::ROW_SIZE;
+use crate::node::Node;
+use crate::node_type::{Child, NodeType};
 use crate::Row;
 
 pub const PAGE_SIZE: usize = 4096;
@@ -19,6 +21,7 @@ pub const TABLE_MAX_PAGES: usize = 100;
 pub const RIGHTMOST_CHILD_OFFSET: usize = 10;
 pub const INTERNAL_CHILDREN_OFFSET: usize = RIGHTMOST_CHILD_OFFSET + 4;
 pub const INTERNAL_CHILD_SIZE: usize = 12;
+
 #[derive(Debug)]
 pub struct Pager {
     file: RefCell<File>,
@@ -268,7 +271,7 @@ impl TryFrom<&Page> for Node<usize, Row> {
         node.num_cells = value.num_cells();
 
         match node.node_type {
-            NodeType::Leaf(ref mut cells) => {
+            NodeType::Leaf(ref mut cells, ..) => {
                 for i in 0..12 as usize {
                     if i == node.num_cells {
                         break;
@@ -279,7 +282,7 @@ impl TryFrom<&Page> for Node<usize, Row> {
                         u32::from_ne_bytes(value.0[cell_key..cell_key + 4].try_into().unwrap())
                             as usize;
                     let value = Row::deserialize(&value.0[cell_val..cell_val + CELL_VALUE_SIZE]);
-                    cells.push(KeyValuePair { key, value })
+                    cells.insert(key, value);
                 }
             }
             NodeType::Internal(ref mut children) => {
@@ -322,10 +325,10 @@ impl TryFrom<&Node<usize, Row>> for Page {
         page.set_num_cells(value.num_cells);
 
         match value.node_type {
-            NodeType::Leaf(ref cells) => {
+            NodeType::Leaf(ref cells, ..) => {
                 let mut i = 0;
-                for KeyValuePair { key, value } in cells {
-                    page.set_cell(i, *key, value);
+                for (&key, value) in cells {
+                    page.set_cell(i, key, value);
                     i += 1;
                 }
             }

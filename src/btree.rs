@@ -1,11 +1,12 @@
-use crate::btree::Fetchable::{Fetched, Unfetched};
+use std::cell::{Ref, RefCell};
+use std::cmp::Ordering;
+
 use crate::cursor::Cursor;
+use crate::fetchable::Fetchable::Unfetched;
+use crate::node::Node;
+use crate::node_type::{Child, NodeType};
 use crate::pager::Pager;
 use crate::Row;
-use std::cell::{Ref, RefCell, RefMut};
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, Bound};
-use std::ops::RangeBounds;
 
 pub const NODE_SIZE: usize = 4096;
 pub const NODE_TYPE_OFFSET: usize = 0;
@@ -21,140 +22,6 @@ pub const CELL_SIZE: usize = CELL_VALUE_SIZE + CELL_KEY_SIZE;
 pub struct KeyValuePair<K, V> {
     pub key: K,
     pub value: V,
-}
-
-#[derive(Debug, Clone)]
-pub enum Fetchable<T> {
-    Fetched(T),
-    Unfetched(usize),
-}
-
-impl<T> Fetchable<T> {
-    pub fn map<U, F>(self, f: F) -> Fetchable<U>
-    where
-        F: FnOnce(T) -> U,
-    {
-        match self {
-            Fetched(x) => Fetched(f(x)),
-            Unfetched(x) => Unfetched(x),
-        }
-    }
-
-    pub fn unwrap(self) -> T {
-        match self {
-            Fetched(x) => x,
-            Unfetched(_) => panic!("called `Fetchable::unwrap()` on an `Unfetched` value"),
-        }
-    }
-    pub fn unwrap_or(self, default: T) -> T {
-        match self {
-            Fetched(x) => x,
-            Unfetched(_) => default,
-        }
-    }
-
-    pub fn unwrap_with_or<U, F>(self, f: F, default: U) -> U
-    where
-        F: FnOnce(T) -> U,
-    {
-        match self {
-            Fetched(x) => f(x),
-            Unfetched(_) => default,
-        }
-    }
-
-    pub fn as_ref(&self) -> Fetchable<&T> {
-        match *self {
-            Fetched(ref x) => Fetched(x),
-            Unfetched(p) => Unfetched(p),
-        }
-    }
-}
-
-/// Child struct to represent internal node keys, and nodes to their left/right
-/// Left/right are Option<T> to indicate whether they have been fetched or not. It is assumed that they exist
-#[derive(Debug, Clone)]
-pub struct Child<K: Ord + PartialEq + Eq> {
-    key: K,
-    left: RefCell<Fetchable<Node<usize, Row>>>,
-    right: RefCell<Fetchable<Node<usize, Row>>>,
-}
-
-impl<K: Ord + PartialEq + Eq> Child<K> {
-    pub fn new(key: K, left_page: usize, right_page: usize) -> Self {
-        Self {
-            key,
-            left: RefCell::new(Unfetched(left_page)),
-            right: RefCell::new(Unfetched(right_page)),
-        }
-    }
-
-    pub fn left(&self) -> Ref<Fetchable<Node<usize, Row>>> {
-        self.left.borrow()
-    }
-
-    pub fn left_mut(&self) -> RefMut<Fetchable<Node<usize, Row>>> {
-        self.left.borrow_mut()
-    }
-    pub fn set_left(&self, n: Node<usize, Row>) {
-        self.left.replace(Fetched(n));
-    }
-    pub fn right(&self) -> Ref<Fetchable<Node<usize, Row>>> {
-        self.right.borrow()
-    }
-    pub fn right_mut(&self) -> RefMut<Fetchable<Node<usize, Row>>> {
-        self.right.borrow_mut()
-    }
-    pub fn set_right(&self, n: Node<usize, Row>) {
-        self.right.replace(Fetched(n));
-    }
-    pub fn key(&self) -> &K {
-        &self.key
-    }
-}
-
-impl<K: Ord + PartialEq + Eq> Eq for Child<K> {}
-
-impl<K: Ord + PartialEq + Eq> PartialEq<Self> for Child<K> {
-    fn eq(&self, other: &Self) -> bool {
-        self.key.eq(&other.key)
-    }
-}
-
-impl<K: Ord + PartialEq + Eq> PartialOrd<Self> for Child<K> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.key.partial_cmp(&other.key)
-    }
-}
-
-impl<K: Ord + PartialEq + Eq> Ord for Child<K> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.key.cmp(&other.key)
-    }
-}
-
-impl<K: Ord + PartialEq + Eq + RangeBounds<K>> RangeBounds<K> for Child<K> {
-    fn start_bound(&self) -> Bound<&K> {
-        self.key.start_bound()
-    }
-
-    fn end_bound(&self) -> Bound<&K> {
-        self.key.end_bound()
-    }
-
-    fn contains<U>(&self, item: &U) -> bool
-    where
-        K: PartialOrd<U>,
-        U: ?Sized + PartialOrd<K>,
-    {
-        self.key.contains(item)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum NodeType<K: Ord, V> {
-    Internal(BTreeSet<Child<K>>),
-    Leaf(Vec<KeyValuePair<K, V>>),
 }
 
 pub struct BTree {
@@ -181,7 +48,7 @@ impl BTree {
 
     pub fn get(&self, page_num: usize, cell_num: usize) -> Row {
         let node = self.pager.get_page(page_num);
-        node.get(cell_num).as_ref().unwrap().value.clone()
+        node.get(cell_num).unwrap().clone()
     }
 
     pub fn insert(&mut self, cursor: &Cursor, value: Row) -> bool {
@@ -200,8 +67,8 @@ impl BTree {
                 Child::new(lower_largest_key.clone(), node.page_num, new_node.page_num);
 
             match value.id.cmp(&(lower_largest_key as u32)) {
-                Ordering::Less => node.insert(0, value.id as usize, value),
-                Ordering::Greater => new_node.insert(0, value.id as usize, value),
+                Ordering::Less => node.insert(value.id as usize, value),
+                Ordering::Greater => new_node.insert(value.id as usize, value),
                 _ => panic!(),
             };
 
@@ -221,7 +88,7 @@ impl BTree {
 
             true
         } else {
-            if node.insert(cursor.cell_num(), value.id as usize, value) {
+            if node.insert(value.id as usize, value) {
                 self.pager.commit_page(&node);
                 if node.is_root {
                     self.root.replace(node);
@@ -276,137 +143,15 @@ impl BTree {
             self._find(k, Ref::map(n, |f| f.as_ref().unwrap()))
         } else {
             node.find(k)
-                .map(|(page_num, cell_num)| {
-                    Cursor::new(
-                        page_num,
-                        cell_num,
-                        (self.pager.num_pages() - 1) == page_num && cell_num >= 12,
-                    )
-                })
-                .map_err(|(page_num, insert_cell_num)| {
-                    Cursor::new(
-                        page_num,
-                        insert_cell_num,
-                        (self.pager.num_pages() - 1) == page_num && insert_cell_num >= 12,
-                    )
-                })
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Node<K: Ord, V> {
-    pub(crate) is_root: bool,
-    pub(crate) node_type: NodeType<K, V>,
-    pub(crate) parent_offset: Option<usize>,
-    pub(crate) num_cells: usize,
-    pub(crate) page_num: usize,
-}
-
-impl<K: Ord, V> Node<K, V> {
-    pub fn leaf() -> Self {
-        Self {
-            is_root: false,
-            node_type: NodeType::Leaf(Vec::new()),
-            parent_offset: None,
-            num_cells: 0,
-            page_num: 0,
-        }
-    }
-
-    pub fn leaf_with_children(children: impl Iterator<Item = KeyValuePair<K, V>>) -> Self {
-        let children = Vec::from_iter(children);
-        let num_cells = children.len();
-        Self {
-            is_root: false,
-            node_type: NodeType::Leaf(children),
-            parent_offset: None,
-            num_cells,
-            page_num: 0,
-        }
-    }
-
-    pub fn internal() -> Self {
-        Self {
-            is_root: false,
-            node_type: NodeType::Internal(BTreeSet::new()),
-            parent_offset: None,
-            num_cells: 0,
-            page_num: 0,
-        }
-    }
-
-    pub fn get(&self, cell_num: usize) -> Option<&KeyValuePair<K, V>> {
-        if let NodeType::Leaf(ref cells) = self.node_type {
-            return cells.get(cell_num);
-        }
-        None
-    }
-
-    pub fn insert(&mut self, cell_num: usize, key: K, value: V) -> bool {
-        match self.node_type {
-            NodeType::Leaf(ref mut cells) => {
-                if cells.len() >= 12 {
-                    return false;
-                }
-                cells.insert(cell_num, KeyValuePair { key, value });
-                self.num_cells += 1;
-                return true;
-            }
-            _ => panic!(),
-        }
-    }
-
-    pub fn find(&self, k: K) -> Result<(usize, usize), (usize, usize)> {
-        match self.node_type {
-            NodeType::Leaf(ref cells) => {
-                // if self.num_cells >= 12 {
-                //     return Err((usize::MAX, 0));
-                // }
-                cells
-                    .binary_search_by(|kv| kv.key.cmp(&k))
-                    .map(|ok| (self.page_num, ok))
-                    .map_err(|err| (self.page_num, err))
-            }
-            NodeType::Internal(_) => {
-                panic!()
-            }
-        }
-    }
-
-    pub fn split(&mut self, new_page_num: usize) -> Node<K, V> {
-        if let NodeType::Leaf(ref mut cells) = self.node_type {
-            let upper = cells.split_off(cells.len() / 2);
-            let mut new_node = Node::leaf_with_children(upper.into_iter());
-            new_node.page_num = new_page_num;
-            self.num_cells = cells.len();
-            return new_node;
-        } else {
-            panic!()
-        }
-    }
-
-    pub fn largest_key(&self) -> Option<&K> {
-        if let NodeType::Leaf(ref cells) = self.node_type {
-            cells.last().map(|kvp| &kvp.key)
-        } else {
-            None
-        }
-    }
-
-    pub fn insert_internal_child(&mut self, record: Child<K>) -> bool {
-        if let NodeType::Internal(ref mut children) = self.node_type {
-            return children.insert(record);
-        }
-
-        false
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::btree::Child;
     use std::collections::BTreeSet;
+
+    use crate::btree::Child;
 
     #[test]
     fn child_tree_shananigans() {
