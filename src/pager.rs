@@ -306,7 +306,7 @@ impl TryFrom<&Page> for Node<usize, Row> {
                         left,
                         right,
                     );
-                    children.insert(child);
+                    children.push(child);
                 }
             }
         }

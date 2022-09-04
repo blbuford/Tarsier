@@ -1,10 +1,10 @@
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::collections::BTreeMap;
 
 use crate::cursor::Cursor;
 use crate::fetchable::Fetchable::Unfetched;
 use crate::node_type::{Child, NodeType};
+
+pub const MAX_INTERNAL_NODES: usize = 511;
 
 #[derive(Debug, Clone)]
 pub struct Node<K: Ord + Clone, V> {
@@ -19,10 +19,7 @@ impl<K: Ord + Clone, V> Node<K, V> {
     pub fn leaf() -> Self {
         Self {
             is_root: false,
-            node_type: NodeType::Leaf(
-                BTreeMap::new(),
-                Rc::new(RefCell::new(Unfetched(usize::MAX))),
-            ),
+            node_type: NodeType::leaf_new(),
             parent_offset: None,
             num_cells: 0,
             page_num: 0,
@@ -33,7 +30,7 @@ impl<K: Ord + Clone, V> Node<K, V> {
         let num_cells = children.len();
         Self {
             is_root: false,
-            node_type: NodeType::Leaf(children, Rc::new(RefCell::new(Unfetched(usize::MAX)))),
+            node_type: NodeType::leaf_with_children(children),
             parent_offset: None,
             num_cells,
             page_num: 0,
@@ -43,7 +40,7 @@ impl<K: Ord + Clone, V> Node<K, V> {
     pub fn internal() -> Self {
         Self {
             is_root: false,
-            node_type: NodeType::Internal(BTreeSet::new()),
+            node_type: NodeType::internal_new(),
             parent_offset: None,
             num_cells: 0,
             page_num: 0,
@@ -71,6 +68,8 @@ impl<K: Ord + Clone, V> Node<K, V> {
         }
     }
 
+    /// Returns a Result<Cursor> pointing to where to operate next. Ok(Cursor) means it found the item
+    /// and is pointing at it. Err(Cursor) is where to insert the item
     pub fn find(&self, k: K) -> Result<Cursor, Cursor> {
         match &self.node_type {
             NodeType::Leaf(ref cells, next_leaf) => match cells.get(&k) {
@@ -116,11 +115,22 @@ impl<K: Ord + Clone, V> Node<K, V> {
         }
     }
 
+    //TODO: Return Result<> here and do error handling
     pub fn insert_internal_child(&mut self, record: Child<K>) -> bool {
         if let NodeType::Internal(ref mut children) = self.node_type {
-            return children.insert(record);
+            match children.binary_search(&record) {
+                Ok(index) => children.insert(index, record),
+                Err(index) => {
+                    if index > MAX_INTERNAL_NODES {
+                        println!("Error: Trying to insert more internal children than can be stored by one node ({})!", index);
+                        panic!();
+                    } else {
+                        children.insert(index, record)
+                    }
+                }
+            }
+            return true;
         }
-
         false
     }
 }

@@ -1,5 +1,3 @@
-extern crate core;
-
 use std::io;
 use std::io::Write;
 use std::process::exit;

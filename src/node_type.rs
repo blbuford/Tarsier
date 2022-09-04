@@ -11,9 +11,30 @@ use crate::Row;
 
 #[derive(Debug, Clone)]
 pub enum NodeType<K: Ord + Clone, V> {
-    Internal(BTreeSet<Child<K>>),
+    Internal(Vec<Child<K>>),
     // Leaf Children (BTreeMap) and Next Leaf Node
     Leaf(BTreeMap<K, V>, Rc<RefCell<Fetchable<Node<K, V>>>>),
+}
+
+impl<K: Ord + Clone, V> NodeType<K, V> {
+    pub fn internal_new() -> Self {
+        Self::Internal(Vec::new())
+    }
+
+    pub fn internal_from_iter(iter: impl Iterator<Item = Child<K>>) -> Self {
+        Self::Internal(Vec::from_iter(iter))
+    }
+
+    pub fn leaf_new() -> Self {
+        Self::Leaf(
+            BTreeMap::new(),
+            Rc::new(RefCell::new(Unfetched(usize::MAX))),
+        )
+    }
+
+    pub fn leaf_with_children(children: BTreeMap<K, V>) -> Self {
+        Self::Leaf(children, Rc::new(RefCell::new(Unfetched(usize::MAX))))
+    }
 }
 
 /// Child struct to represent internal node keys, and nodes to their left/right

@@ -113,11 +113,11 @@ impl BTree {
     }
     fn _find(&self, k: usize, node: Ref<Node<usize, Row>>) -> Result<Cursor, Cursor> {
         if let NodeType::Internal(ref children) = node.node_type {
-            let child = match children.range(..=Child::new(k, 0, 0)).next_back() {
-                Some(c) => Some(c),
-                None => children.iter().next(),
-            }
-            .unwrap();
+            let child = match children.binary_search(&Child::new(k, 0, 0)) {
+                Ok(index) => index,
+                Err(index) => index - 1,
+            };
+            let child = children.get(child).unwrap();
             let mut uf = usize::MAX;
             let n = match k.cmp(child.key()) {
                 Ordering::Greater => {
