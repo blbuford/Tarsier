@@ -1,6 +1,5 @@
 use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Bound, RangeBounds};
 use std::rc::Rc;
 
@@ -10,10 +9,10 @@ use crate::node::Node;
 use crate::Row;
 
 #[derive(Debug, Clone)]
-pub enum NodeType<K: Ord + Clone, V> {
+pub enum NodeType<K, V> {
     Internal(Vec<Child<K>>),
     // Leaf Children (BTreeMap) and Next Leaf Node
-    Leaf(BTreeMap<K, V>, Rc<RefCell<Fetchable<Node<K, V>>>>),
+    Leaf(Vec<KeyValuePair<K, V>>, Rc<RefCell<Fetchable<Node<K, V>>>>),
 }
 
 impl<K: Ord + Clone, V> NodeType<K, V> {
@@ -26,13 +25,10 @@ impl<K: Ord + Clone, V> NodeType<K, V> {
     }
 
     pub fn leaf_new() -> Self {
-        Self::Leaf(
-            BTreeMap::new(),
-            Rc::new(RefCell::new(Unfetched(usize::MAX))),
-        )
+        Self::Leaf(Vec::new(), Rc::new(RefCell::new(Unfetched(usize::MAX))))
     }
 
-    pub fn leaf_with_children(children: BTreeMap<K, V>) -> Self {
+    pub fn leaf_with_children(children: Vec<KeyValuePair<K, V>>) -> Self {
         Self::Leaf(children, Rc::new(RefCell::new(Unfetched(usize::MAX))))
     }
 }
@@ -40,7 +36,7 @@ impl<K: Ord + Clone, V> NodeType<K, V> {
 /// Child struct to represent internal node keys, and nodes to their left/right
 /// Left/right are Option<T> to indicate whether they have been fetched or not. It is assumed that they exist
 #[derive(Debug, Clone)]
-pub struct Child<K: Ord + PartialEq + Eq> {
+pub struct Child<K> {
     key: K,
     left: RefCell<Fetchable<Node<usize, Row>>>,
     right: RefCell<Fetchable<Node<usize, Row>>>,
@@ -115,4 +111,10 @@ impl<K: Ord + PartialEq + Eq + RangeBounds<K>> RangeBounds<K> for Child<K> {
     {
         self.key.contains(item)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyValuePair<K, V> {
+    pub key: K,
+    pub value: V,
 }

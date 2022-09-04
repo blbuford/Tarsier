@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
 use crate::cursor::Cursor;
-use crate::fetchable::Fetchable::Unfetched;
-use crate::node_type::{Child, NodeType};
+use crate::fetchable::Fetchable::{Fetched, Unfetched};
+use crate::node_type::{Child, KeyValuePair, NodeType};
 
 pub const MAX_INTERNAL_NODES: usize = 511;
 
 #[derive(Debug, Clone)]
-pub struct Node<K: Ord + Clone, V> {
+pub struct Node<K, V> {
     pub(crate) is_root: bool,
     pub(crate) node_type: NodeType<K, V>,
     pub(crate) parent_offset: Option<usize>,
@@ -26,7 +26,7 @@ impl<K: Ord + Clone, V> Node<K, V> {
         }
     }
 
-    pub fn leaf_with_children(children: BTreeMap<K, V>) -> Self {
+    pub fn leaf_with_children(children: Vec<KeyValuePair<K, V>>) -> Self {
         let num_cells = children.len();
         Self {
             is_root: false,
@@ -47,20 +47,29 @@ impl<K: Ord + Clone, V> Node<K, V> {
         }
     }
 
-    pub fn get(&self, key: K) -> Option<&V> {
+    pub fn get(&self, key: &K) -> Option<&V>
+    where
+        K: Ord,
+    {
         if let NodeType::Leaf(ref cells, _) = self.node_type {
-            return cells.get(&key);
+            return match cells.binary_search_by_key(&key, |pair| &pair.key) {
+                Ok(index) => cells.get(index).map(|kvp| &kvp.value),
+                Err(_) => None,
+            };
         }
         None
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> bool {
+    pub fn insert(&mut self, location: usize, key: K, value: V) -> bool
+    where
+        K: Ord,
+    {
         match self.node_type {
             NodeType::Leaf(ref mut cells, _) => {
                 if cells.len() >= 12 {
                     return false;
                 }
-                cells.insert(key, value);
+                cells.insert(location, KeyValuePair { key, value });
                 self.num_cells += 1;
                 return true;
             }
@@ -70,24 +79,40 @@ impl<K: Ord + Clone, V> Node<K, V> {
 
     /// Returns a Result<Cursor> pointing to where to operate next. Ok(Cursor) means it found the item
     /// and is pointing at it. Err(Cursor) is where to insert the item
-    pub fn find(&self, k: K) -> Result<Cursor, Cursor> {
+    pub fn find(&self, key: &K) -> Result<Cursor, Cursor> {
         match &self.node_type {
-            NodeType::Leaf(ref cells, next_leaf) => match cells.get(&k) {
-                Some(v) => {
-                    if let Unfetched(pg) = next_leaf.borrow().as_ref() {
-                        Ok(Cursor::new(
-                            self.page_num,
-                            0,
-                            self.num_cells < 12
-                                && cells.iter().last().unwrap().0.lt(&k)
-                                && pg != usize::MAX,
-                        ))
-                    } else {
-                        Ok(Cursor::new(self.page_num, 0, false))
+            NodeType::Leaf(ref cells, next_leaf) => {
+                let next = match next_leaf.borrow().as_ref() {
+                    Unfetched(page) => {
+                        if page == usize::MAX {
+                            None
+                        } else {
+                            Some(page)
+                        }
+                    }
+                    Fetched(node) => Some(node.page_num),
+                };
+                match cells.binary_search_by_key(&key, |pair| &pair.key) {
+                    Ok(index) => {
+                        if next.is_none() {
+                            Ok(Cursor::new(
+                                self.page_num,
+                                index,
+                                self.num_cells - 1 == index,
+                            ))
+                        } else {
+                            Ok(Cursor::new(self.page_num, index, false))
+                        }
+                    }
+                    Err(index) => {
+                        if next.is_none() {
+                            Err(Cursor::new(self.page_num, index, self.num_cells == index))
+                        } else {
+                            Err(Cursor::new(self.page_num, index, false))
+                        }
                     }
                 }
-                None => Err(Cursor::new(self.page_num, 0, false)),
-            },
+            }
             NodeType::Internal(_) => {
                 panic!()
             }
@@ -96,8 +121,7 @@ impl<K: Ord + Clone, V> Node<K, V> {
 
     pub fn split(&mut self, new_page_num: usize) -> Node<K, V> {
         if let NodeType::Leaf(ref mut cells, ..) = self.node_type {
-            let split_key = cells.iter().skip(5).next().map(|(k, _)| k.clone()).unwrap();
-            let upper = cells.split_off(&split_key);
+            let upper = cells.split_off(cells.len() / 2);
             let mut new_node = Node::leaf_with_children(upper);
             new_node.page_num = new_page_num;
             self.num_cells = cells.len();
@@ -109,7 +133,7 @@ impl<K: Ord + Clone, V> Node<K, V> {
 
     pub fn largest_key(&self) -> Option<&K> {
         if let NodeType::Leaf(ref cells, ..) = self.node_type {
-            cells.iter().last().map(|kvp| kvp.0)
+            cells.iter().last().map(|pair| &pair.key)
         } else {
             None
         }

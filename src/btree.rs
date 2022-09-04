@@ -18,12 +18,6 @@ pub const CELL_VALUE_SIZE: usize = 291;
 pub const CELL_OFFSET: usize = 10;
 pub const CELL_SIZE: usize = CELL_VALUE_SIZE + CELL_KEY_SIZE;
 
-#[derive(Debug, Clone)]
-pub struct KeyValuePair<K, V> {
-    pub key: K,
-    pub value: V,
-}
-
 pub struct BTree {
     root: RefCell<Node<usize, Row>>,
     pager: Pager,
@@ -48,7 +42,7 @@ impl BTree {
 
     pub fn get(&self, page_num: usize, cell_num: usize) -> Row {
         let node = self.pager.get_page(page_num);
-        node.get(cell_num).unwrap().clone()
+        node.get(&cell_num).unwrap().clone()
     }
 
     pub fn insert(&mut self, cursor: &Cursor, value: Row) -> bool {
@@ -66,9 +60,16 @@ impl BTree {
             let child_record =
                 Child::new(lower_largest_key.clone(), node.page_num, new_node.page_num);
 
+            // TODO: Probably wrong because Cursor was computed pre-split
             match value.id.cmp(&(lower_largest_key as u32)) {
-                Ordering::Less => node.insert(value.id as usize, value),
-                Ordering::Greater => new_node.insert(value.id as usize, value),
+                Ordering::Less => {
+                    let c = node.find(&(value.id as usize)).unwrap_err();
+                    node.insert(c.cell_num(), value.id as usize, value)
+                }
+                Ordering::Greater => {
+                    let c = new_node.find(&(value.id as usize)).unwrap_err();
+                    new_node.insert(c.cell_num(), value.id as usize, value)
+                }
                 _ => panic!(),
             };
 
@@ -88,7 +89,7 @@ impl BTree {
 
             true
         } else {
-            if node.insert(value.id as usize, value) {
+            if node.insert(cursor.cell_num(), value.id as usize, value) {
                 self.pager.commit_page(&node);
                 if node.is_root {
                     self.root.replace(node);
@@ -142,43 +143,31 @@ impl BTree {
 
             self._find(k, Ref::map(n, |f| f.as_ref().unwrap()))
         } else {
-            node.find(k)
+            node.find(&k)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::fs::OpenOptions;
 
-    use crate::btree::Child;
+    use crate::btree::BTree;
+    use crate::pager::Pager;
 
+    fn test_db_file_truncate() {
+        let test_db = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open("test.db")
+            .expect("test database");
+        test_db.sync_all().expect("sync changes to disk");
+    }
     #[test]
-    fn child_tree_shananigans() {
-        let mut bt = BTreeSet::new();
-        bt.insert(Child::new(4 as usize, 1, 2));
-        bt.insert(Child::new(9 as usize, 2, 3));
-        let smallest = match bt.range(..=Child::new(5, 0, 0)).next_back() {
-            Some(c) => Some(c),
-            None => bt.iter().next(),
-        };
-
-        assert!(smallest.is_some());
-        assert_eq!(*smallest.unwrap().key(), 4);
-
-        let largest = match bt.range(..=Child::new(10, 0, 0)).next_back() {
-            Some(c) => Some(c),
-            None => bt.iter().next(),
-        };
-
-        assert!(largest.is_some());
-        assert_eq!(*largest.unwrap().key(), 9);
-
-        let equiv = match bt.range(..=Child::new(9, 0, 0)).next_back() {
-            Some(c) => Some(c),
-            None => bt.iter().next(),
-        };
-        assert!(equiv.is_some());
-        assert_eq!(*equiv.unwrap().key(), 9);
+    fn test_multiple_leaf_splits() {
+        test_db_file_truncate();
+        let mut pager = Pager::open("test.db");
+        let mut bt = BTree::new(pager);
     }
 }

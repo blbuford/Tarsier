@@ -13,7 +13,7 @@ use crate::btree::{
 };
 use crate::datastore::ROW_SIZE;
 use crate::node::Node;
-use crate::node_type::{Child, NodeType};
+use crate::node_type::{Child, KeyValuePair, NodeType};
 use crate::Row;
 
 pub const PAGE_SIZE: usize = 4096;
@@ -282,7 +282,7 @@ impl TryFrom<&Page> for Node<usize, Row> {
                         u32::from_ne_bytes(value.0[cell_key..cell_key + 4].try_into().unwrap())
                             as usize;
                     let value = Row::deserialize(&value.0[cell_val..cell_val + CELL_VALUE_SIZE]);
-                    cells.insert(key, value);
+                    cells.push(KeyValuePair { key, value });
                 }
             }
             NodeType::Internal(ref mut children) => {
@@ -327,8 +327,8 @@ impl TryFrom<&Node<usize, Row>> for Page {
         match value.node_type {
             NodeType::Leaf(ref cells, ..) => {
                 let mut i = 0;
-                for (&key, value) in cells {
-                    page.set_cell(i, key, value);
+                for KeyValuePair { key, value } in cells {
+                    page.set_cell(i, *key, value);
                     i += 1;
                 }
             }
