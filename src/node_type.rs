@@ -1,5 +1,6 @@
 use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
+use std::fmt::Debug;
 use std::ops::{Bound, RangeBounds};
 use std::rc::Rc;
 
@@ -10,25 +11,25 @@ use crate::Row;
 
 #[derive(Debug, Clone)]
 pub enum NodeType<K, V> {
-    Internal(Vec<Child<K>>),
-    // Leaf Children (BTreeMap) and Next Leaf Node
+    /// 0: Vector of Keys, 1: Vector of Child-Fetchable References
+    Internal(Vec<K>, Vec<RefCell<Fetchable<Node<K,V>>>>),
+    /// 0: Leaf Children (BTreeMap), 1: Next Leaf Node
     Leaf(Vec<KeyValuePair<K, V>>, Rc<RefCell<Fetchable<Node<K, V>>>>),
 }
 
 impl<K: Ord + Clone, V> NodeType<K, V> {
     pub fn internal_new() -> Self {
-        Self::Internal(Vec::new())
-    }
-
-    pub fn internal_from_iter(iter: impl Iterator<Item = Child<K>>) -> Self {
-        Self::Internal(Vec::from_iter(iter))
+        Self::Internal(Vec::new(), Vec::new())
     }
 
     pub fn leaf_new() -> Self {
         Self::Leaf(Vec::new(), Rc::new(RefCell::new(Unfetched(usize::MAX))))
     }
 
-    pub fn leaf_with_children(children: Vec<KeyValuePair<K, V>>) -> Self {
+    pub fn leaf_with_children(children: Vec<KeyValuePair<K, V>>) -> Self
+    where
+        V: Debug,
+    {
         Self::Leaf(children, Rc::new(RefCell::new(Unfetched(usize::MAX))))
     }
 }

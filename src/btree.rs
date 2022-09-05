@@ -1,10 +1,10 @@
-use std::cell::{Ref, RefCell};
+use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 
 use crate::cursor::Cursor;
-use crate::fetchable::Fetchable::Unfetched;
+use crate::fetchable::Fetchable::{Fetched, Unfetched};
 use crate::node::Node;
-use crate::node_type::{Child, NodeType};
+use crate::node_type::NodeType;
 use crate::pager::Pager;
 use crate::Row;
 
@@ -18,6 +18,7 @@ pub const CELL_VALUE_SIZE: usize = 291;
 pub const CELL_OFFSET: usize = 10;
 pub const CELL_SIZE: usize = CELL_VALUE_SIZE + CELL_KEY_SIZE;
 
+#[derive(Debug)]
 pub struct BTree {
     root: RefCell<Node<usize, Row>>,
     pager: Pager,
@@ -57,10 +58,7 @@ impl BTree {
             node.parent_offset = Some(new_parent.page_num);
             new_node.parent_offset = Some(new_parent.page_num);
             let lower_largest_key = node.largest_key().unwrap().clone();
-            let child_record =
-                Child::new(lower_largest_key.clone(), node.page_num, new_node.page_num);
 
-            // TODO: Probably wrong because Cursor was computed pre-split
             match value.id.cmp(&(lower_largest_key as u32)) {
                 Ordering::Less => {
                     let c = node.find(&(value.id as usize)).unwrap_err();
@@ -74,11 +72,13 @@ impl BTree {
             };
 
             self.pager.commit_page(&node);
-            child_record.set_left(node);
             self.pager.commit_page(&new_node);
-            child_record.set_right(new_node);
 
-            if !new_parent.insert_internal_child(child_record) {
+            if !new_parent.insert_internal_child(
+                lower_largest_key.clone(),
+                Some(Fetched(node)),
+                Some(Fetched(new_node)),
+            ) {
                 panic!()
             }
             self.pager.commit_page(&new_parent);
@@ -110,40 +110,56 @@ impl BTree {
     }
 
     pub fn find(&self, k: usize) -> Result<Cursor, Cursor> {
-        self._find(k, self.root.borrow())
+        dbg!(self._find(k, self.root.borrow()))
     }
     fn _find(&self, k: usize, node: Ref<Node<usize, Row>>) -> Result<Cursor, Cursor> {
-        if let NodeType::Internal(ref children) = node.node_type {
-            let child = match children.binary_search(&Child::new(k, 0, 0)) {
-                Ok(index) => index,
-                Err(index) => index - 1,
+        if let NodeType::Internal(ref keys, ref children) = node.node_type {
+            let child = match keys.binary_search(&k) {
+                Ok(index) => index + 1,
+                Err(index) => index,
             };
             let child = children.get(child).unwrap();
-            let mut uf = usize::MAX;
-            let n = match k.cmp(child.key()) {
-                Ordering::Greater => {
-                    if let Unfetched(page_num) = *child.right() {
-                        uf = page_num;
-                    }
-                    if uf != usize::MAX {
-                        child.set_right(self.pager.get_page(uf))
-                    }
-                    child.right()
+            {
+                let n = if let Unfetched(page_num) = *child.borrow() {
+                    Some(self.pager.get_page(page_num.clone()))
+                } else {
+                    None
+                };
+                if let Some(n) = n {
+                    child.replace(Fetched(n));
                 }
-                _ => {
-                    if let Unfetched(page_num) = *child.left() {
-                        uf = page_num;
-                    }
-                    if uf != usize::MAX {
-                        child.set_left(self.pager.get_page(uf))
-                    }
-                    child.left()
-                }
-            };
+            }
 
-            self._find(k, Ref::map(n, |f| f.as_ref().unwrap()))
+            self._find(k, Ref::map(child.borrow(), |f| f.as_ref().unwrap()))
         } else {
             node.find(&k)
+        }
+    }
+
+    fn _insert(&self, k: usize, mut node: RefMut<Node<usize, Row>>, value: Row) -> bool {
+        if let NodeType::Internal(ref keys, ref children) = node.node_type {
+            let child = match keys.binary_search(&k) {
+                Ok(index) => index + 1,
+                Err(index) => index,
+            };
+            let child = children.get(child).unwrap();
+            {
+                let n = if let Unfetched(page_num) = *child.borrow() {
+                    Some(self.pager.get_page(page_num.clone()))
+                } else {
+                    None
+                };
+                if let Some(n) = n {
+                    child.replace(Fetched(n));
+                }
+            }
+
+            let node = RefMut::map(child.borrow_mut(), |f| f.as_mut().unwrap());
+
+            self._insert(k, node, value)
+        } else {
+            let c = node.find(&(value.id as usize)).unwrap_err();
+            node.insert(c.cell_num(), (value.id as usize), value)
         }
     }
 }
@@ -154,6 +170,7 @@ mod tests {
 
     use crate::btree::BTree;
     use crate::pager::Pager;
+    use crate::Row;
 
     fn test_db_file_truncate() {
         let test_db = OpenOptions::new()
@@ -169,5 +186,21 @@ mod tests {
         test_db_file_truncate();
         let mut pager = Pager::open("test.db");
         let mut bt = BTree::new(pager);
+
+        for i in 0..15 {
+            if i == 14 {
+                println!("18");
+            }
+            let c = bt.find(i).unwrap_err();
+            assert!(bt.insert(
+                &c,
+                Row {
+                    id: i as u32,
+                    username: String::from(format!("user{i}")),
+                    email: String::from(format!("user{i}@example.com"))
+                }
+            ));
+        }
+        dbg!(bt);
     }
 }

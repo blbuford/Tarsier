@@ -29,6 +29,12 @@ impl<T> Fetchable<T> {
             Unfetched(_) => default,
         }
     }
+    pub fn unwrap_unfetched(&self) -> &usize {
+        match self {
+            Unfetched(x) => x,
+            Fetched(_) => panic!(),
+        }
+    }
 
     pub fn unwrap_with_or<U, F>(self, f: F, default: U) -> U
     where
@@ -43,6 +49,13 @@ impl<T> Fetchable<T> {
     pub fn as_ref(&self) -> Fetchable<&T> {
         match *self {
             Fetched(ref x) => Fetched(x),
+            Unfetched(p) => Unfetched(p),
+        }
+    }
+
+    pub fn as_mut(&mut self) -> Fetchable<&mut T> {
+        match *self {
+            Fetched(ref mut x) => Fetched(x),
             Unfetched(p) => Unfetched(p),
         }
     }

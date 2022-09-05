@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
@@ -12,6 +12,8 @@ use crate::btree::{
     PARENT_OFFSET,
 };
 use crate::datastore::ROW_SIZE;
+use crate::fetchable::Fetchable;
+use crate::fetchable::Fetchable::Unfetched;
 use crate::node::Node;
 use crate::node_type::{Child, KeyValuePair, NodeType};
 use crate::Row;
@@ -92,6 +94,7 @@ impl Pager {
                 if n.page_num > self.num_pages.get() {
                     self.num_pages.set(n.page_num + 1);
                 }
+                dbg!(n.page_num);
                 self.page_cache.borrow_mut().insert(n.page_num, new_page);
             }
             Err(_) => {
@@ -222,22 +225,26 @@ impl Page {
             .swap_with_slice(&mut (rightmost_child as u32).to_ne_bytes());
     }
 
-    pub fn set_internal_child(&mut self, child: &Child<usize>, slot: usize) {
+    pub fn set_internal_child(
+        &mut self,
+        slot: usize,
+        key: usize,
+        left: Ref<Fetchable<Node<usize, Row>>>,
+        right: Ref<Fetchable<Node<usize, Row>>>,
+    ) {
         let child_left = INTERNAL_CHILDREN_OFFSET + (slot * INTERNAL_CHILD_SIZE);
         let child_key = child_left + 4;
         let child_right = child_key + 4;
         self.0[child_left..child_left + 4].swap_with_slice(
-            &mut (child
-                .left()
+            &mut (left
                 .as_ref()
                 .unwrap_with_or(|n| n.page_num.clone(), u32::MAX as usize)
                 as u32)
                 .to_ne_bytes(),
         );
-        self.0[child_key..child_key + 4].swap_with_slice(&mut (*child.key() as u32).to_ne_bytes());
+        self.0[child_key..child_key + 4].swap_with_slice(&mut (key as u32).to_ne_bytes());
         self.0[child_right..child_right + 4].swap_with_slice(
-            &mut (child
-                .right()
+            &mut (right
                 .as_ref()
                 .unwrap_with_or(|n| n.page_num.clone(), u32::MAX as usize)
                 as u32)
@@ -285,7 +292,7 @@ impl TryFrom<&Page> for Node<usize, Row> {
                     cells.push(KeyValuePair { key, value });
                 }
             }
-            NodeType::Internal(ref mut children) => {
+            NodeType::Internal(ref mut keys, ref mut children) => {
                 let rightmost = value.rightmost_child();
                 for slot in 0..=rightmost {
                     let child_left = INTERNAL_CHILDREN_OFFSET + (slot * INTERNAL_CHILD_SIZE);
@@ -300,13 +307,17 @@ impl TryFrom<&Page> for Node<usize, Row> {
                         value.0[child_right..child_right + 4].try_into().unwrap(),
                     ) as usize;
 
-                    let child = Child::new(
-                        u32::from_ne_bytes(value.0[child_key..child_key + 4].try_into().unwrap())
-                            as usize,
-                        left,
-                        right,
-                    );
-                    children.push(child);
+                    keys.push(child_key);
+                    if let Some(l) = children.get(slot) {
+                        let x = l.borrow();
+                        let fetch = x.as_ref();
+                        assert!(matches!(fetch, Fetchable::Unfetched { .. }));
+                        assert_eq!(fetch.unwrap_unfetched(), &left)
+                    } else {
+                        children.insert(slot, RefCell::new(Unfetched(left)));
+                    }
+
+                    children.insert(slot + 1, RefCell::new(Unfetched(right)));
                 }
             }
         }
@@ -332,10 +343,15 @@ impl TryFrom<&Node<usize, Row>> for Page {
                     i += 1;
                 }
             }
-            NodeType::Internal(ref children) => {
+            NodeType::Internal(ref keys, ref children) => {
                 page.set_rightmost_child(children.len() - 1);
-                for (slot, child) in children.iter().enumerate() {
-                    page.set_internal_child(child, slot)
+                for (slot, ((&key, left), right)) in keys
+                    .iter()
+                    .zip(children.iter())
+                    .zip(children.iter().skip(1))
+                    .enumerate()
+                {
+                    page.set_internal_child(slot, key, left.borrow(), right.borrow())
                 }
             }
         }
