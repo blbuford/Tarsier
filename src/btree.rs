@@ -1,9 +1,10 @@
+use std::borrow::{Borrow, BorrowMut};
 use std::cell::{Ref, RefCell, RefMut};
 use std::cmp::Ordering;
 
 use crate::cursor::Cursor;
 use crate::fetchable::Fetchable::{Fetched, Unfetched};
-use crate::node::Node;
+use crate::node::{InsertResult, Node, SplitEntry, MAX_INTERNAL_NODES};
 use crate::node_type::NodeType;
 use crate::pager::Pager;
 use crate::Row;
@@ -62,11 +63,11 @@ impl BTree {
             match value.id.cmp(&(lower_largest_key as u32)) {
                 Ordering::Less => {
                     let c = node.find(&(value.id as usize)).unwrap_err();
-                    node.insert(c.cell_num(), value.id as usize, value)
+                    node.insert(value.id as usize, value)
                 }
                 Ordering::Greater => {
                     let c = new_node.find(&(value.id as usize)).unwrap_err();
-                    new_node.insert(c.cell_num(), value.id as usize, value)
+                    new_node.insert(value.id as usize, value)
                 }
                 _ => panic!(),
             };
@@ -74,11 +75,7 @@ impl BTree {
             self.pager.commit_page(&node);
             self.pager.commit_page(&new_node);
 
-            if !new_parent.insert_internal_child(
-                lower_largest_key.clone(),
-                Some(Fetched(node)),
-                Some(Fetched(new_node)),
-            ) {
+            if !new_parent.insert_internal_child(lower_largest_key.clone(), Fetched(new_node)) {
                 panic!()
             }
             self.pager.commit_page(&new_parent);
@@ -89,7 +86,7 @@ impl BTree {
 
             true
         } else {
-            if node.insert(cursor.cell_num(), value.id as usize, value) {
+            if let InsertResult::Success = node.insert(value.id as usize, value) {
                 self.pager.commit_page(&node);
                 if node.is_root {
                     self.root.replace(node);
@@ -136,30 +133,53 @@ impl BTree {
         }
     }
 
-    fn _insert(&self, k: usize, mut node: RefMut<Node<usize, Row>>, value: Row) -> bool {
-        if let NodeType::Internal(ref keys, ref children) = node.node_type {
+    fn _insert(
+        &mut self,
+        k: usize,
+        mut node: RefMut<Node<usize, Row>>,
+        value: Row,
+    ) -> InsertResult<usize, Row> {
+        if let NodeType::Internal(ref mut keys, ref mut children) = node.node_type {
+            // find the child page of the key that we wish to insert on
             let child = match keys.binary_search(&k) {
-                Ok(index) => index + 1,
+                Ok(index) => index,
                 Err(index) => index,
             };
             let child = children.get(child).unwrap();
-            {
-                let n = if let Unfetched(page_num) = *child.borrow() {
-                    Some(self.pager.get_page(page_num.clone()))
-                } else {
-                    None
-                };
-                if let Some(n) = n {
-                    child.replace(Fetched(n));
-                }
+
+            // fetch the page if it hasn't been
+            let n = if let Unfetched(page_num) = *child.borrow() {
+                Some(self.pager.get_page(page_num.clone()))
+            } else {
+                None
+            };
+            if let Some(n) = n {
+                child.replace(Fetched(n));
             }
 
+            // Ref magic and recursively call down to the leaf
             let node = RefMut::map(child.borrow_mut(), |f| f.as_mut().unwrap());
 
-            self._insert(k, node, value)
+            match self._insert(k, node, value) {
+                InsertResult::ParentSplit(SplitEntry { separator, tree }) => {
+                    let location = keys.binary_search(&separator).unwrap_err();
+                    keys.insert(location, separator.clone());
+                    children.insert(location + 1, RefCell::new(Fetched(tree)));
+                    return if keys.len() >= MAX_INTERNAL_NODES {
+                        //split internal
+                        let upper_keys = keys.split_off((keys.len() / 2) - 1);
+                        let separator = upper_keys.first().unwrap().clone();
+                        let upper_children = children.split_off(keys.len() / 2);
+                        let tree = Node::internal_with_separators(upper_keys, upper_children);
+                        InsertResult::ParentSplit(SplitEntry { separator, tree })
+                    } else {
+                        InsertResult::Success
+                    };
+                }
+                result => result,
+            }
         } else {
-            let c = node.find(&(value.id as usize)).unwrap_err();
-            node.insert(c.cell_num(), (value.id as usize), value)
+            node.insert(value.id as usize, value)
         }
     }
 }

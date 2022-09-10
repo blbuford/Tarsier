@@ -7,7 +7,19 @@ use crate::fetchable::Fetchable::{Fetched, Unfetched};
 use crate::node_type::{KeyValuePair, NodeType};
 
 pub const MAX_INTERNAL_NODES: usize = 511;
+pub const MAX_LEAF_NODES: usize = 12;
 
+#[derive(Debug, Clone)]
+pub enum InsertResult<K, V> {
+    Success,
+    DuplicateKey,
+    ParentSplit(SplitEntry<K, V>),
+}
+#[derive(Debug, Clone)]
+pub struct SplitEntry<K, V> {
+    pub(crate) separator: K,
+    pub(crate) tree: Node<K, V>,
+}
 #[derive(Debug, Clone)]
 pub struct Node<K, V> {
     pub(crate) is_root: bool,
@@ -49,6 +61,19 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
         }
     }
 
+    pub fn internal_with_separators(
+        keys: Vec<K>,
+        children: Vec<RefCell<Fetchable<Node<K, V>>>>,
+    ) -> Self {
+        Self {
+            is_root: false,
+            node_type: NodeType::internal_with_separators(keys, children),
+            parent_offset: None,
+            num_cells: 0,
+            page_num: 0,
+        }
+    }
+
     pub fn get(&self, key: &K) -> Option<&V>
     where
         K: Ord,
@@ -62,21 +87,30 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
         None
     }
 
-    pub fn insert(&mut self, location: usize, key: K, value: V) -> bool
+    pub fn insert(&mut self, key: K, value: V) -> InsertResult<K, V>
     where
         K: Ord + Debug,
         V: Debug,
     {
-        dbg!(&value);
-        dbg!(&self);
         match self.node_type {
             NodeType::Leaf(ref mut cells, _) => {
-                if cells.len() >= 12 {
-                    panic!();
-                }
+                let location = match cells.binary_search_by_key(&key, |pair| pair.key.clone()) {
+                    Ok(_duplicate_index) => return InsertResult::DuplicateKey,
+                    Err(index) => index,
+                };
                 cells.insert(location, KeyValuePair { key, value });
                 self.num_cells += 1;
-                return true;
+                return if self.num_cells <= MAX_LEAF_NODES {
+                    InsertResult::Success
+                } else {
+                    let upper = cells.split_off((cells.len() / 2) - 1);
+                    let new_node = Node::leaf_with_children(upper);
+                    self.num_cells = cells.len();
+                    InsertResult::ParentSplit(SplitEntry {
+                        separator: new_node.smallest_key().unwrap(),
+                        tree: new_node,
+                    })
+                };
             }
             _ => panic!(),
         }
@@ -148,14 +182,16 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
             None
         }
     }
+    pub fn smallest_key(&self) -> Option<K> {
+        if let NodeType::Leaf(ref cells, ..) = self.node_type {
+            cells.first().map(|pair| pair.key.clone())
+        } else {
+            None
+        }
+    }
 
     //TODO: Return Result<> here and do error handling
-    pub fn insert_internal_child(
-        &mut self,
-        key: K,
-        left: Option<Fetchable<Node<K, V>>>,
-        right: Option<Fetchable<Node<K, V>>>,
-    ) -> bool {
+    pub fn insert_internal_child(&mut self, key: K, right: Fetchable<Node<K, V>>) -> bool {
         if let NodeType::Internal(ref mut keys, ref mut children) = self.node_type {
             match keys.binary_search(&key) {
                 Ok(_index) => {
@@ -167,17 +203,30 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
                         panic!();
                     } else {
                         keys.insert(index, key);
-                        if let Some(left) = left {
-                            children.insert(index, RefCell::new(left))
-                        }
-                        if let Some(right) = right {
-                            children.insert(index + 1, RefCell::new(right))
-                        }
+                        children.insert(index + 1, RefCell::new(right))
                     }
                 }
             }
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::node::{InsertResult, Node, MAX_LEAF_NODES};
+
+    #[test]
+    fn test_leaf_inserts() {
+        let mut n: Node<usize, usize> = Node::leaf();
+        for i in 0..MAX_LEAF_NODES {
+            assert!(matches!(n.insert(i, i), InsertResult::Success));
+        }
+        assert!(matches!(n.insert(0, 0), InsertResult::DuplicateKey));
+        assert!(matches!(
+            n.insert(MAX_LEAF_NODES + 1, 0),
+            InsertResult::ParentSplit(..)
+        ));
     }
 }

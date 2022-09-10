@@ -12,7 +12,7 @@ use crate::Row;
 #[derive(Debug, Clone)]
 pub enum NodeType<K, V> {
     /// 0: Vector of Keys, 1: Vector of Child-Fetchable References
-    Internal(Vec<K>, Vec<RefCell<Fetchable<Node<K,V>>>>),
+    Internal(Vec<K>, Vec<RefCell<Fetchable<Node<K, V>>>>),
     /// 0: Leaf Children (BTreeMap), 1: Next Leaf Node
     Leaf(Vec<KeyValuePair<K, V>>, Rc<RefCell<Fetchable<Node<K, V>>>>),
 }
@@ -20,6 +20,13 @@ pub enum NodeType<K, V> {
 impl<K: Ord + Clone, V> NodeType<K, V> {
     pub fn internal_new() -> Self {
         Self::Internal(Vec::new(), Vec::new())
+    }
+
+    pub fn internal_with_separators(
+        keys: Vec<K>,
+        children: Vec<RefCell<Fetchable<Node<K, V>>>>,
+    ) -> Self {
+        Self::Internal(keys, children)
     }
 
     pub fn leaf_new() -> Self {
