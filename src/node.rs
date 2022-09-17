@@ -1,10 +1,12 @@
+use crate::btree::NodeLink;
 use std::cell::RefCell;
 use std::fmt::Debug;
+use std::rc::Rc;
 
 use crate::cursor::Cursor;
 use crate::fetchable::Fetchable;
 use crate::fetchable::Fetchable::{Fetched, Unfetched};
-use crate::node_type::{KeyValuePair, NodeType};
+use crate::node_type::{InternalNode, KeyValuePair, LeafNode, NodeType};
 
 pub const MAX_INTERNAL_NODES: usize = 511;
 pub const MAX_LEAF_NODES: usize = 12;
@@ -61,10 +63,7 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
         }
     }
 
-    pub fn internal_with_separators(
-        keys: Vec<K>,
-        children: Vec<RefCell<Fetchable<Node<K, V>>>>,
-    ) -> Self {
+    pub fn internal_with_separators(keys: Vec<K>, children: Vec<NodeLink<K, V>>) -> Self {
         Self {
             is_root: false,
             node_type: NodeType::internal_with_separators(keys, children),
@@ -78,41 +77,43 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
     where
         K: Ord,
     {
-        if let NodeType::Leaf(ref cells, _) = self.node_type {
-            return match cells.binary_search_by_key(&key, |pair| &pair.key) {
-                Ok(index) => cells.get(index).map(|kvp| &kvp.value),
+        if let NodeType::Leaf(LeafNode { ref children, .. }) = self.node_type {
+            return match children.binary_search_by_key(&key, |pair| &pair.key) {
+                Ok(index) => children.get(index).map(|kvp| &kvp.value),
                 Err(_) => None,
             };
         }
         None
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> InsertResult<K, V>
+    pub fn insert_leaf(&mut self, key: K, value: V) -> InsertResult<K, V>
     where
         K: Ord + Debug,
         V: Debug,
     {
-        match self.node_type {
-            NodeType::Leaf(ref mut cells, _) => {
-                let location = match cells.binary_search_by_key(&key, |pair| pair.key.clone()) {
-                    Ok(_duplicate_index) => return InsertResult::DuplicateKey,
-                    Err(index) => index,
-                };
-                cells.insert(location, KeyValuePair { key, value });
-                self.num_cells += 1;
-                return if self.num_cells <= MAX_LEAF_NODES {
-                    InsertResult::Success
-                } else {
-                    let upper = cells.split_off((cells.len() / 2) - 1);
-                    let new_node = Node::leaf_with_children(upper);
-                    self.num_cells = cells.len();
-                    InsertResult::ParentSplit(SplitEntry {
-                        separator: new_node.smallest_key().unwrap(),
-                        tree: new_node,
-                    })
-                };
-            }
-            _ => panic!(),
+        if let NodeType::Leaf(LeafNode {
+            ref mut children, ..
+        }) = self.node_type
+        {
+            let location = match children.binary_search_by_key(&key, |pair| pair.key.clone()) {
+                Ok(_duplicate_index) => return InsertResult::DuplicateKey,
+                Err(index) => index,
+            };
+            children.insert(location, KeyValuePair { key, value });
+            self.num_cells += 1;
+            return if self.num_cells <= MAX_LEAF_NODES {
+                InsertResult::Success
+            } else {
+                let upper = children.split_off((children.len() / 2) - 1);
+                let new_node = Node::leaf_with_children(upper);
+                self.num_cells = children.len();
+                InsertResult::ParentSplit(SplitEntry {
+                    separator: new_node.smallest_key().unwrap(),
+                    tree: new_node,
+                })
+            };
+        } else {
+            panic!()
         }
     }
 
@@ -124,19 +125,26 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
     {
         dbg!(key);
         match &self.node_type {
-            NodeType::Leaf(ref cells, next_leaf) => {
-                dbg!(cells);
-                let next = match next_leaf.borrow().as_ref() {
-                    Unfetched(page) => {
-                        if page == usize::MAX {
-                            None
-                        } else {
-                            Some(page)
+            NodeType::Leaf(LeafNode {
+                children,
+                next_leaf,
+                ..
+            }) => {
+                dbg!(children);
+                let next = next_leaf
+                    .as_ref()
+                    .map(|next_leaf| match next_leaf.borrow().as_ref() {
+                        Unfetched(page) => {
+                            if page == usize::MAX {
+                                None
+                            } else {
+                                Some(page)
+                            }
                         }
-                    }
-                    Fetched(node) => Some(node.page_num),
-                };
-                match cells.binary_search_by_key(&key, |pair| dbg!(&pair.key)) {
+                        Fetched(node) => Some(node.page_num),
+                    })
+                    .flatten();
+                match children.binary_search_by_key(&key, |pair| dbg!(&pair.key)) {
                     Ok(index) => {
                         if next.is_none() {
                             Ok(Cursor::new(
@@ -164,11 +172,14 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
     }
 
     pub fn split(&mut self, new_page_num: usize) -> Node<K, V> {
-        if let NodeType::Leaf(ref mut cells, ..) = self.node_type {
-            let upper = cells.split_off(cells.len() / 2);
+        if let NodeType::Leaf(LeafNode {
+            ref mut children, ..
+        }) = self.node_type
+        {
+            let upper = children.split_off(children.len() / 2);
             let mut new_node = Node::leaf_with_children(upper);
             new_node.page_num = new_page_num;
-            self.num_cells = cells.len();
+            self.num_cells = children.len();
             return new_node;
         } else {
             panic!()
@@ -176,15 +187,15 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
     }
 
     pub fn largest_key(&self) -> Option<&K> {
-        if let NodeType::Leaf(ref cells, ..) = self.node_type {
-            cells.iter().last().map(|pair| &pair.key)
+        if let NodeType::Leaf(LeafNode { ref children, .. }) = self.node_type {
+            children.iter().last().map(|pair| &pair.key)
         } else {
             None
         }
     }
     pub fn smallest_key(&self) -> Option<K> {
-        if let NodeType::Leaf(ref cells, ..) = self.node_type {
-            cells.first().map(|pair| pair.key.clone())
+        if let NodeType::Leaf(LeafNode { ref children, .. }) = self.node_type {
+            children.first().map(|pair| pair.key.clone())
         } else {
             None
         }
@@ -192,8 +203,12 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
 
     //TODO: Return Result<> here and do error handling
     pub fn insert_internal_child(&mut self, key: K, right: Fetchable<Node<K, V>>) -> bool {
-        if let NodeType::Internal(ref mut keys, ref mut children) = self.node_type {
-            match keys.binary_search(&key) {
+        if let NodeType::Internal(InternalNode {
+            ref mut separators,
+            ref mut children,
+        }) = self.node_type
+        {
+            match separators.binary_search(&key) {
                 Ok(_index) => {
                     panic!("Duplicate key");
                 }
@@ -202,8 +217,8 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
                         println!("Error: Trying to insert more internal children than can be stored by one node ({})!", index);
                         panic!();
                     } else {
-                        keys.insert(index, key);
-                        children.insert(index + 1, RefCell::new(right))
+                        separators.insert(index, key);
+                        children.insert(index + 1, Rc::new(RefCell::new(right)))
                     }
                 }
             }
@@ -221,11 +236,11 @@ mod tests {
     fn test_leaf_inserts() {
         let mut n: Node<usize, usize> = Node::leaf();
         for i in 0..MAX_LEAF_NODES {
-            assert!(matches!(n.insert(i, i), InsertResult::Success));
+            assert!(matches!(n.insert_leaf(i, i), InsertResult::Success));
         }
-        assert!(matches!(n.insert(0, 0), InsertResult::DuplicateKey));
+        assert!(matches!(n.insert_leaf(0, 0), InsertResult::DuplicateKey));
         assert!(matches!(
-            n.insert(MAX_LEAF_NODES + 1, 0),
+            n.insert_leaf(MAX_LEAF_NODES + 1, 0),
             InsertResult::ParentSplit(..)
         ));
     }

@@ -1,11 +1,11 @@
-use std::borrow::{Borrow, BorrowMut};
 use std::cell::{Ref, RefCell, RefMut};
-use std::cmp::Ordering;
+use std::rc::Rc;
 
 use crate::cursor::Cursor;
+use crate::fetchable::Fetchable;
 use crate::fetchable::Fetchable::{Fetched, Unfetched};
-use crate::node::{InsertResult, Node, SplitEntry, MAX_INTERNAL_NODES};
-use crate::node_type::NodeType;
+use crate::node::{InsertResult, Node, SplitEntry, MAX_INTERNAL_NODES, MAX_LEAF_NODES};
+use crate::node_type::{InternalNode, KeyValuePair, LeafNode, NodeType};
 use crate::pager::Pager;
 use crate::Row;
 
@@ -24,6 +24,8 @@ pub struct BTree {
     root: RefCell<Node<usize, Row>>,
     pager: Pager,
 }
+
+pub type NodeLink<K, V> = Rc<RefCell<Fetchable<Node<K, V>>>>;
 
 impl BTree {
     pub fn new(mut pager: Pager) -> Self {
@@ -47,55 +49,49 @@ impl BTree {
         node.get(&cell_num).unwrap().clone()
     }
 
-    pub fn insert(&mut self, cursor: &Cursor, value: Row) -> bool {
-        let mut node = self.pager.get_page(cursor.page_num());
-        // TODO: Check this node's parent offset for an internal node. If exists, split all of its children to maintain B+-Tree height property
-        return if node.num_cells >= 12 {
-            let mut new_node = node.split(self.pager.num_pages());
-            let mut new_parent: Node<usize, Row> = Node::internal();
-            new_parent.page_num = self.pager.num_pages() + 1;
-            std::mem::swap(&mut node.page_num, &mut new_parent.page_num);
-            std::mem::swap(&mut node.is_root, &mut new_parent.is_root);
-            node.parent_offset = Some(new_parent.page_num);
-            new_node.parent_offset = Some(new_parent.page_num);
-            let lower_largest_key = node.largest_key().unwrap().clone();
-
-            match value.id.cmp(&(lower_largest_key as u32)) {
-                Ordering::Less => {
-                    let c = node.find(&(value.id as usize)).unwrap_err();
-                    node.insert(value.id as usize, value)
-                }
-                Ordering::Greater => {
-                    let c = new_node.find(&(value.id as usize)).unwrap_err();
-                    new_node.insert(value.id as usize, value)
-                }
-                _ => panic!(),
-            };
-
-            self.pager.commit_page(&node);
-            self.pager.commit_page(&new_node);
-
-            if !new_parent.insert_internal_child(lower_largest_key.clone(), Fetched(new_node)) {
-                panic!()
-            }
-            self.pager.commit_page(&new_parent);
-
-            if new_parent.is_root {
-                self.root.replace(new_parent);
-            }
-
+    pub fn insert(&mut self, key: usize, value: Row) -> bool {
+        let SplitEntry { separator, tree } = match self._insert(key, self.root.borrow_mut(), value)
+        {
+            InsertResult::Success => return true,
+            InsertResult::DuplicateKey => return false,
+            InsertResult::ParentSplit(x) => x,
+        };
+        //infamous root split case
+        let grow_tree = if let NodeType::Leaf(_) = self.root.borrow().node_type {
             true
         } else {
-            if let InsertResult::Success = node.insert(value.id as usize, value) {
-                self.pager.commit_page(&node);
-                if node.is_root {
-                    self.root.replace(node);
-                }
-                true
-            } else {
-                false
-            }
+            self.root.borrow().num_cells >= MAX_INTERNAL_NODES
         };
+        if grow_tree {
+            // root is either a leaf node and we're making it an internal
+            // or its internal and we're splitting it up
+            let mut new_root = Node::internal();
+            new_root.is_root = true;
+            new_root.page_num = 0;
+            let mut old_root = self.root.replace(new_root);
+            old_root.page_num = self.pager.get_new_unused_page();
+            old_root.is_root = false;
+            if let NodeType::Internal(InternalNode {
+                ref mut separators,
+                ref mut children,
+            }) = self.root.borrow_mut().node_type
+            {
+                separators.push(separator);
+                children.push(Rc::new(RefCell::new(Fetched(old_root))));
+                children.push(Rc::new(RefCell::new(Fetched(tree))));
+            }
+        } else {
+            if let NodeType::Internal(InternalNode {
+                ref mut separators,
+                ref mut children,
+            }) = self.root.borrow_mut().node_type
+            {
+                separators.push(separator);
+                children.push(Rc::new(RefCell::new(Fetched(tree))));
+            }
+        }
+
+        true
     }
 
     pub fn root(&self) -> Ref<Node<usize, Row>> {
@@ -110,8 +106,12 @@ impl BTree {
         dbg!(self._find(k, self.root.borrow()))
     }
     fn _find(&self, k: usize, node: Ref<Node<usize, Row>>) -> Result<Cursor, Cursor> {
-        if let NodeType::Internal(ref keys, ref children) = node.node_type {
-            let child = match keys.binary_search(&k) {
+        if let NodeType::Internal(InternalNode {
+            ref separators,
+            ref children,
+        }) = node.node_type
+        {
+            let child = match separators.binary_search(&k) {
                 Ok(index) => index + 1,
                 Err(index) => index,
             };
@@ -139,9 +139,14 @@ impl BTree {
         mut node: RefMut<Node<usize, Row>>,
         value: Row,
     ) -> InsertResult<usize, Row> {
-        if let NodeType::Internal(ref mut keys, ref mut children) = node.node_type {
+        let page_num = node.page_num;
+        if let NodeType::Internal(InternalNode {
+            ref mut separators,
+            ref mut children,
+        }) = node.node_type
+        {
             // find the child page of the key that we wish to insert on
-            let child = match keys.binary_search(&k) {
+            let child = match separators.binary_search(&k) {
                 Ok(index) => index,
                 Err(index) => index,
             };
@@ -158,19 +163,27 @@ impl BTree {
             }
 
             // Ref magic and recursively call down to the leaf
-            let node = RefMut::map(child.borrow_mut(), |f| f.as_mut().unwrap());
+            let parent = RefMut::map(child.borrow_mut(), |f| f.as_mut().unwrap());
 
-            match self._insert(k, node, value) {
-                InsertResult::ParentSplit(SplitEntry { separator, tree }) => {
-                    let location = keys.binary_search(&separator).unwrap_err();
-                    keys.insert(location, separator.clone());
-                    children.insert(location + 1, RefCell::new(Fetched(tree)));
-                    return if keys.len() >= MAX_INTERNAL_NODES {
+            match self._insert(k, parent, value) {
+                InsertResult::ParentSplit(SplitEntry {
+                    separator,
+                    mut tree,
+                }) => {
+                    tree.parent_offset = Some(page_num);
+                    tree.page_num = self.pager.get_new_unused_page();
+                    let location = separators.binary_search(&separator).unwrap_err();
+                    separators.insert(location, separator.clone());
+                    self.pager.commit_page(&tree);
+                    children.insert(location + 1, Rc::new(RefCell::new(Fetched(tree))));
+
+                    return if separators.len() >= MAX_INTERNAL_NODES {
                         //split internal
-                        let upper_keys = keys.split_off((keys.len() / 2) - 1);
+                        let upper_keys = separators.split_off((separators.len() / 2) - 1);
                         let separator = upper_keys.first().unwrap().clone();
-                        let upper_children = children.split_off(keys.len() / 2);
+                        let upper_children = children.split_off(separators.len() / 2);
                         let tree = Node::internal_with_separators(upper_keys, upper_children);
+
                         InsertResult::ParentSplit(SplitEntry { separator, tree })
                     } else {
                         InsertResult::Success
@@ -179,10 +192,79 @@ impl BTree {
                 result => result,
             }
         } else {
-            node.insert(value.id as usize, value)
+            self.insert_leaf(node, value.id as usize, value)
+        }
+    }
+    pub fn insert_leaf(
+        &mut self,
+        mut node: RefMut<Node<usize, Row>>,
+        key: usize,
+        value: Row,
+    ) -> InsertResult<usize, Row> {
+        if let NodeType::Leaf(LeafNode {
+            ref mut children, ..
+        }) = node.node_type
+        {
+            let location = match children.binary_search_by_key(&key, |pair| pair.key.clone()) {
+                Ok(_duplicate_index) => return InsertResult::DuplicateKey,
+                Err(index) => index,
+            };
+            children.insert(location, KeyValuePair { key, value });
+
+            return if children.len() <= MAX_LEAF_NODES {
+                node.num_cells += 1;
+                self.pager.commit_page_ref(node);
+                InsertResult::Success
+            } else {
+                let upper = children.split_off((children.len() / 2) - 1);
+                let new_node = Node::leaf_with_children(upper);
+                node.num_cells = children.len();
+                self.pager.commit_page_ref(node);
+                InsertResult::ParentSplit(SplitEntry {
+                    separator: new_node.smallest_key().unwrap(),
+                    tree: new_node,
+                })
+            };
+        } else {
+            panic!()
         }
     }
 }
+
+// struct BTIterator {
+//     current: Option<NodeLink<usize, Row>>,
+//     tree: BTree,
+//     last_elem: usize,
+// }
+// impl Iterator for BTIterator {
+//     type Item = Row;
+//
+//     fn next(&mut self) -> Option<Self::Item> {
+//         match &self.current {
+//             Some(node) => {
+//                 let mut cursor = node.clone();
+//                 loop {
+//                     cursor = match cursor.borrow().as_ref() {
+//                         Fetched(x) => match x.node_type {
+//                             NodeType::Internal(InternalNode { ref children, .. }) => {
+//                                 children.first().unwrap().clone()
+//                             }
+//                             NodeType::Leaf(_) => break,
+//                         },
+//                         Unfetched(i) => match self.tree.pager.get_page(i).node_type {
+//                             NodeType::Internal(InternalNode { ref children, .. }) => {
+//                                 children.first().unwrap().clone()
+//                             }
+//                             NodeType::Leaf(_) => break,
+//                         },
+//                     };
+//                 }
+//                 todo!()
+//             }
+//             None => None,
+//         }
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -204,16 +286,15 @@ mod tests {
     #[test]
     fn test_multiple_leaf_splits() {
         test_db_file_truncate();
-        let mut pager = Pager::open("test.db");
+        let pager = Pager::open("test.db");
         let mut bt = BTree::new(pager);
 
         for i in 0..15 {
             if i == 14 {
                 println!("18");
             }
-            let c = bt.find(i).unwrap_err();
             assert!(bt.insert(
-                &c,
+                i,
                 Row {
                     id: i as u32,
                     username: String::from(format!("user{i}")),

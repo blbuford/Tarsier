@@ -1,11 +1,13 @@
-use std::cell::{Cell, Ref, RefCell};
-use std::collections::HashMap;
+use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::path::Path;
 use std::process::exit;
+use std::rc::Rc;
 
 use crate::btree::{
     CELL_KEY_SIZE, CELL_OFFSET, CELL_SIZE, CELL_VALUE_SIZE, IS_ROOT_OFFSET, NUM_CELLS_OFFSET,
@@ -15,7 +17,7 @@ use crate::datastore::ROW_SIZE;
 use crate::fetchable::Fetchable;
 use crate::fetchable::Fetchable::Unfetched;
 use crate::node::Node;
-use crate::node_type::{Child, KeyValuePair, NodeType};
+use crate::node_type::{InternalNode, KeyValuePair, LeafNode, NodeType};
 use crate::Row;
 
 pub const PAGE_SIZE: usize = 4096;
@@ -29,6 +31,7 @@ pub struct Pager {
     file: RefCell<File>,
     num_pages: Cell<usize>,
     page_cache: RefCell<HashMap<usize, Page>>,
+    unused_pages: RefCell<BinaryHeap<Reverse<usize>>>,
 }
 
 impl Pager {
@@ -50,6 +53,7 @@ impl Pager {
                     file: RefCell::new(file),
                     num_pages,
                     page_cache: RefCell::new(HashMap::new()),
+                    unused_pages: RefCell::new(BinaryHeap::new()),
                 }
             }
             Err(why) => {
@@ -57,6 +61,24 @@ impl Pager {
                 exit(-1);
             }
         }
+    }
+
+    pub fn get_new_unused_page(&self) -> usize {
+        return if let Ok(mut pq) = self.unused_pages.try_borrow_mut() {
+            if pq.is_empty() {
+                self.num_pages.set(self.num_pages.get() + 1);
+                self.num_pages.get()
+            } else {
+                pq.pop().unwrap().0
+            }
+        } else {
+            self.num_pages.set(self.num_pages.get() + 1);
+            self.num_pages.get()
+        };
+    }
+
+    pub fn set_page_recycled(&mut self, page: usize) {
+        self.unused_pages.borrow_mut().push(Reverse(page));
     }
 
     pub fn get_page(&self, page_num: usize) -> Node<usize, Row> {
@@ -89,6 +111,21 @@ impl Pager {
     }
 
     pub fn commit_page(&mut self, n: &Node<usize, Row>) {
+        match Page::try_from(n) {
+            Ok(new_page) => {
+                if n.page_num > self.num_pages.get() {
+                    self.num_pages.set(n.page_num + 1);
+                }
+                dbg!(n.page_num);
+                self.page_cache.borrow_mut().insert(n.page_num, new_page);
+            }
+            Err(_) => {
+                println!("Unable to commit page {}", n.page_num);
+                exit(-1);
+            }
+        }
+    }
+    pub fn commit_page_ref(&mut self, n: RefMut<Node<usize, Row>>) {
         match Page::try_from(n) {
             Ok(new_page) => {
                 if n.page_num > self.num_pages.get() {
@@ -278,7 +315,9 @@ impl TryFrom<&Page> for Node<usize, Row> {
         node.num_cells = value.num_cells();
 
         match node.node_type {
-            NodeType::Leaf(ref mut cells, ..) => {
+            NodeType::Leaf(LeafNode {
+                ref mut children, ..
+            }) => {
                 for i in 0..12 as usize {
                     if i == node.num_cells {
                         break;
@@ -289,10 +328,13 @@ impl TryFrom<&Page> for Node<usize, Row> {
                         u32::from_ne_bytes(value.0[cell_key..cell_key + 4].try_into().unwrap())
                             as usize;
                     let value = Row::deserialize(&value.0[cell_val..cell_val + CELL_VALUE_SIZE]);
-                    cells.push(KeyValuePair { key, value });
+                    children.push(KeyValuePair { key, value });
                 }
             }
-            NodeType::Internal(ref mut keys, ref mut children) => {
+            NodeType::Internal(InternalNode {
+                ref mut separators,
+                ref mut children,
+            }) => {
                 let rightmost = value.rightmost_child();
                 for slot in 0..=rightmost {
                     let child_left = INTERNAL_CHILDREN_OFFSET + (slot * INTERNAL_CHILD_SIZE);
@@ -307,17 +349,17 @@ impl TryFrom<&Page> for Node<usize, Row> {
                         value.0[child_right..child_right + 4].try_into().unwrap(),
                     ) as usize;
 
-                    keys.push(child_key);
+                    separators.push(child_key);
                     if let Some(l) = children.get(slot) {
                         let x = l.borrow();
                         let fetch = x.as_ref();
                         assert!(matches!(fetch, Fetchable::Unfetched { .. }));
                         assert_eq!(fetch.unwrap_unfetched(), &left)
                     } else {
-                        children.insert(slot, RefCell::new(Unfetched(left)));
+                        children.insert(slot, Rc::new(RefCell::new(Unfetched(left))));
                     }
 
-                    children.insert(slot + 1, RefCell::new(Unfetched(right)));
+                    children.insert(slot + 1, Rc::new(RefCell::new(Unfetched(right))));
                 }
             }
         }
@@ -336,16 +378,56 @@ impl TryFrom<&Node<usize, Row>> for Page {
         page.set_num_cells(value.num_cells);
 
         match value.node_type {
-            NodeType::Leaf(ref cells, ..) => {
+            NodeType::Leaf(LeafNode { ref children, .. }) => {
                 let mut i = 0;
-                for KeyValuePair { key, value } in cells {
+                for KeyValuePair { key, value } in children {
                     page.set_cell(i, *key, value);
                     i += 1;
                 }
             }
-            NodeType::Internal(ref keys, ref children) => {
+            NodeType::Internal(InternalNode {
+                ref separators,
+                ref children,
+            }) => {
                 page.set_rightmost_child(children.len() - 1);
-                for (slot, ((&key, left), right)) in keys
+                for (slot, ((&key, left), right)) in separators
+                    .iter()
+                    .zip(children.iter())
+                    .zip(children.iter().skip(1))
+                    .enumerate()
+                {
+                    page.set_internal_child(slot, key, left.borrow(), right.borrow())
+                }
+            }
+        }
+
+        Ok(page)
+    }
+}
+
+impl TryFrom<RefMut<'static, Node<usize, Row>>> for Page {
+    type Error = ();
+
+    fn try_from(value: RefMut<Node<usize, Row>>) -> Result<Self, Self::Error> {
+        let mut page = Page::new();
+        page.set_root_node(value.is_root);
+        page.set_parent_offset(value.parent_offset);
+        page.set_num_cells(value.num_cells);
+
+        match value.node_type {
+            NodeType::Leaf(LeafNode { ref children, .. }) => {
+                let mut i = 0;
+                for KeyValuePair { key, value } in children {
+                    page.set_cell(i, *key, value);
+                    i += 1;
+                }
+            }
+            NodeType::Internal(InternalNode {
+                ref separators,
+                ref children,
+            }) => {
+                page.set_rightmost_child(children.len() - 1);
+                for (slot, ((&key, left), right)) in separators
                     .iter()
                     .zip(children.iter())
                     .zip(children.iter().skip(1))

@@ -98,7 +98,7 @@ impl Table {
                 if cursor.page_num() == usize::MAX {
                     return ExecuteResult::TableFull;
                 }
-                if !self.btree.insert(&cursor, row) {
+                if !self.btree.insert(row.id as usize, row) {
                     return ExecuteResult::TableFull;
                 }
                 ExecuteResult::InsertSuccess
@@ -261,36 +261,6 @@ mod tests {
         assert_eq!(
             table.execute_statement(statement),
             ExecuteResult::DuplicateKey
-        );
-    }
-
-    #[test]
-    fn table_insert_max_rows() {
-        let mut table = open_test_db();
-        for i in 0..13 {
-            assert_eq!(
-                table.execute_statement(Statement {
-                    statement_type: StatementType::Insert,
-                    row_to_insert: Some(Row {
-                        id: i as u32,
-                        username: String::from(format!("user{i}")),
-                        email: String::from(format!("user{i}@example.com")),
-                    }),
-                }),
-                ExecuteResult::InsertSuccess
-            );
-        }
-
-        assert_eq!(
-            table.execute_statement(Statement {
-                statement_type: StatementType::Insert,
-                row_to_insert: Some(Row {
-                    id: TABLE_MAX_ROWS as u32,
-                    username: String::from(format!("user{TABLE_MAX_ROWS}")),
-                    email: String::from(format!("user{TABLE_MAX_ROWS}@example.com")),
-                }),
-            }),
-            ExecuteResult::TableFull
         );
     }
 
