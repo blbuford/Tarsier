@@ -1,12 +1,8 @@
-use crate::btree::NodeLink;
-use std::cell::RefCell;
 use std::fmt::Debug;
-use std::rc::Rc;
 
 use crate::cursor::Cursor;
-use crate::fetchable::Fetchable;
-use crate::fetchable::Fetchable::{Fetched, Unfetched};
 use crate::node_type::{InternalNode, KeyValuePair, LeafNode, NodeType};
+use crate::pager::{HasOffset, Offset};
 
 pub const MAX_INTERNAL_NODES: usize = 511;
 pub const MAX_LEAF_NODES: usize = 12;
@@ -25,20 +21,22 @@ pub struct SplitEntry<K, V> {
 #[derive(Debug, Clone)]
 pub struct Node<K, V> {
     pub(crate) is_root: bool,
+    pub(crate) is_dirty: bool,
     pub(crate) node_type: NodeType<K, V>,
-    pub(crate) parent_offset: Option<usize>,
+    pub(crate) parent_offset: Option<Offset>,
     pub(crate) num_cells: usize,
-    pub(crate) page_num: usize,
+    pub(crate) offset: Offset,
 }
 
 impl<K: Ord + Clone, V: Debug> Node<K, V> {
     pub fn leaf() -> Self {
         Self {
             is_root: false,
+            is_dirty: true,
             node_type: NodeType::leaf_new(),
             parent_offset: None,
             num_cells: 0,
-            page_num: 0,
+            offset: Offset(0),
         }
     }
 
@@ -46,30 +44,33 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
         let num_cells = children.len();
         Self {
             is_root: false,
+            is_dirty: true,
             node_type: NodeType::leaf_with_children(children),
             parent_offset: None,
             num_cells,
-            page_num: 0,
+            offset: Offset(0),
         }
     }
 
     pub fn internal() -> Self {
         Self {
             is_root: false,
+            is_dirty: true,
             node_type: NodeType::internal_new(),
             parent_offset: None,
             num_cells: 0,
-            page_num: 0,
+            offset: Offset(0),
         }
     }
 
-    pub fn internal_with_separators(keys: Vec<K>, children: Vec<NodeLink<K, V>>) -> Self {
+    pub fn internal_with_separators(keys: Vec<K>, children: Vec<Offset>) -> Self {
         Self {
             is_root: false,
+            is_dirty: true,
             node_type: NodeType::internal_with_separators(keys, children),
             parent_offset: None,
             num_cells: 0,
-            page_num: 0,
+            offset: Offset(0),
         }
     }
 
@@ -131,36 +132,22 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
                 ..
             }) => {
                 dbg!(children);
-                let next = next_leaf
-                    .as_ref()
-                    .map(|next_leaf| match next_leaf.borrow().as_ref() {
-                        Unfetched(page) => {
-                            if page == usize::MAX {
-                                None
-                            } else {
-                                Some(page)
-                            }
-                        }
-                        Fetched(node) => Some(node.page_num),
-                    })
-                    .flatten();
+
                 match children.binary_search_by_key(&key, |pair| dbg!(&pair.key)) {
-                    Ok(index) => {
-                        if next.is_none() {
-                            Ok(Cursor::new(
-                                self.page_num,
-                                index,
-                                self.num_cells - 1 == index,
-                            ))
-                        } else {
-                            Ok(Cursor::new(self.page_num, index, false))
-                        }
-                    }
+                    Ok(index) => Ok(Cursor::new(
+                        self.offset,
+                        index,
+                        next_leaf.is_none() && index == self.num_cells - 1,
+                    )),
                     Err(index) => {
-                        if next.is_none() {
-                            Err(Cursor::new(self.page_num, index, self.num_cells == index))
+                        if index > MAX_LEAF_NODES && next_leaf.is_some() {
+                            Err(Cursor::new(next_leaf.unwrap(), 0, false))
                         } else {
-                            Err(Cursor::new(self.page_num, index, false))
+                            Err(Cursor::new(
+                                self.offset,
+                                index,
+                                next_leaf.is_none() && index == self.num_cells,
+                            ))
                         }
                     }
                 }
@@ -171,14 +158,14 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
         }
     }
 
-    pub fn split(&mut self, new_page_num: usize) -> Node<K, V> {
+    pub fn split(&mut self, new_page: Offset) -> Node<K, V> {
         if let NodeType::Leaf(LeafNode {
             ref mut children, ..
         }) = self.node_type
         {
             let upper = children.split_off(children.len() / 2);
             let mut new_node = Node::leaf_with_children(upper);
-            new_node.page_num = new_page_num;
+            new_node.offset = new_page;
             self.num_cells = children.len();
             return new_node;
         } else {
@@ -202,7 +189,7 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
     }
 
     //TODO: Return Result<> here and do error handling
-    pub fn insert_internal_child(&mut self, key: K, right: Fetchable<Node<K, V>>) -> bool {
+    pub fn insert_internal_child(&mut self, key: K, right: Offset) -> bool {
         if let NodeType::Internal(InternalNode {
             ref mut separators,
             ref mut children,
@@ -218,13 +205,56 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
                         panic!();
                     } else {
                         separators.insert(index, key);
-                        children.insert(index + 1, Rc::new(RefCell::new(right)))
+                        children.insert(index + 1, right)
                     }
                 }
             }
             return true;
         }
         false
+    }
+    pub fn set_last_leaf(&mut self, last: Option<Offset>) -> Option<Offset> {
+        if let NodeType::Leaf(LeafNode { mut last_leaf, .. }) = self.node_type {
+            match last {
+                Some(o) => last_leaf.replace(o),
+                None => last_leaf.take(),
+            }
+        } else {
+            panic!("Called on a non-leaf node!")
+        }
+    }
+
+    pub fn set_next_leaf(&mut self, next: Option<Offset>) -> Option<Offset> {
+        if let NodeType::Leaf(LeafNode { mut next_leaf, .. }) = self.node_type {
+            match next {
+                Some(o) => next_leaf.replace(o),
+                None => next_leaf.take(),
+            }
+        } else {
+            panic!("Called on a non-leaf node!")
+        }
+    }
+
+    pub fn get_next_leaf(&mut self) -> Option<Offset> {
+        if let NodeType::Leaf(LeafNode { mut next_leaf, .. }) = self.node_type {
+            next_leaf.clone()
+        } else {
+            panic!("Called on a non-leaf node!")
+        }
+    }
+
+    pub fn get_last_leaf(&mut self) -> Option<Offset> {
+        if let NodeType::Leaf(LeafNode { mut last_leaf, .. }) = self.node_type {
+            last_leaf.clone()
+        } else {
+            panic!("Called on a non-leaf node!")
+        }
+    }
+}
+
+impl<K, V> HasOffset for Node<K, V> {
+    fn offset(&self) -> Offset {
+        self.offset
     }
 }
 

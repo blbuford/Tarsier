@@ -3,7 +3,8 @@ use std::path::Path;
 
 use crate::btree::BTree;
 use crate::cursor::Cursor;
-use crate::pager::{Pager, PAGE_SIZE, TABLE_MAX_PAGES};
+use crate::page::{PAGE_SIZE, TABLE_MAX_PAGES};
+use crate::pager::Pager;
 use crate::{Statement, StatementType};
 
 pub const ROW_SIZE: usize = 291;
@@ -95,7 +96,7 @@ impl Table {
             Ok(_duplicate_location) => ExecuteResult::DuplicateKey,
             Err(cursor) => {
                 dbg!(&cursor);
-                if cursor.page_num() == usize::MAX {
+                if cursor.offset().0 == usize::MAX {
                     return ExecuteResult::TableFull;
                 }
                 if !self.btree.insert(row.id as usize, row) {
@@ -112,7 +113,7 @@ impl Table {
         while !cursor.is_at_end_of_table() {
             let row = cursor.value(&self.btree);
             rows.push(row.clone());
-            cursor.advance(&self.btree);
+            self.btree.advance_cursor(&mut cursor);
         }
         ExecuteResult::SelectSuccess(rows)
     }
@@ -123,7 +124,7 @@ mod tests {
     use std::fs::OpenOptions;
 
     use crate::datastore::TABLE_MAX_ROWS;
-    use crate::pager::Page;
+    use crate::page::Page;
     use crate::{ExecuteResult, Row, Statement, StatementType, Table};
 
     fn open_test_db() -> Table {

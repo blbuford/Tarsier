@@ -1,54 +1,45 @@
 use crate::btree::BTree;
+use crate::pager::Offset;
 use crate::Row;
 
 #[derive(Debug)]
 pub struct Cursor {
-    page_num: usize,
-    cell_num: usize,
-    end_of_table: bool,
+    pub offset: Offset,
+    pub cell_num: usize,
+    pub end_of_table: bool,
 }
 
 impl Cursor {
     pub fn start(tree: &BTree) -> Self {
-        let root = tree.root();
-        let page_num = root.page_num;
-        let end_of_table = root.num_cells == 0;
+        let offset = tree.root();
+        let end_of_table = tree.is_empty();
         Self {
-            page_num,
+            offset,
             cell_num: 0,
             end_of_table,
         }
     }
 
-    pub fn new(page_num: usize, cell_num: usize, end_of_table: bool) -> Self {
+    pub fn new(offset: Offset, cell_num: usize, end_of_table: bool) -> Self {
         Self {
-            page_num,
+            offset,
             cell_num,
             end_of_table,
         }
     }
 
-    pub fn page_num(&self) -> usize {
-        self.page_num
+    pub fn offset(&self) -> &Offset {
+        &self.offset
+    }
+    pub fn increment_cell_num(&mut self) {
+        self.cell_num += 1;
     }
     pub fn cell_num(&self) -> usize {
         self.cell_num
     }
 
     pub fn value(&self, tree: &BTree) -> Row {
-        tree.get(self.page_num, self.cell_num)
-    }
-
-    // pub fn insert_at(&mut self, row: Row) -> bool {
-    //     self.tree.insert(self.page_num, self.cell_num, row)
-    // }
-
-    pub fn advance(&mut self, tree: &BTree) {
-        self.cell_num += 1;
-        let node = tree.root();
-        if self.cell_num >= node.num_cells {
-            self.end_of_table = true;
-        }
+        tree.get(&self.offset, self.cell_num)
     }
 
     pub fn is_at_end_of_table(&self) -> bool {
