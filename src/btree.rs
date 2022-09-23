@@ -43,9 +43,14 @@ impl BTree {
         }
     }
 
-    pub fn get(&self, offset: &Offset, cell_num: usize) -> Row {
+    pub fn get(&self, offset: &Offset, cell_num: usize) -> Option<Row> {
         let node = self.pager.get(offset);
-        node.get(&cell_num).unwrap().clone()
+        match node.node_type {
+            NodeType::Leaf(LeafNode { children, .. }) => {
+                children.get(cell_num).map(|kv| kv.value.clone())
+            }
+            _ => panic!("Can't retrive a row from an internal node"),
+        }
     }
 
     pub fn insert(&mut self, key: usize, value: Row) -> bool {
@@ -82,7 +87,8 @@ impl BTree {
                 children.push(tree.offset);
             }
             self.pager.commit(&new_root);
-            self.pager.commit(&root_node)
+            self.pager.commit(&root_node);
+            self.pager.commit(&tree);
         } else {
             if let NodeType::Internal(InternalNode {
                 ref mut separators,
@@ -250,7 +256,7 @@ impl BTree {
                 node.num_cells += 1;
                 InsertResult::Success
             } else {
-                let upper = children.split_off((children.len() / 2) - 1);
+                let upper = children.split_off(children.len() / 2);
                 let mut new_node = Node::leaf_with_children(upper);
                 node.num_cells = children.len();
                 new_node.offset = self.pager.new_page();
@@ -264,6 +270,28 @@ impl BTree {
             panic!()
         }
     }
+
+    pub fn cursor_start(&self) -> Cursor {
+        let mut cursor = self.root.clone();
+        let mut end_of_table = false;
+        loop {
+            let node = self.pager.get(&cursor);
+            match node.node_type {
+                NodeType::Internal(InternalNode { children, .. }) => {
+                    cursor = children.first().unwrap().clone()
+                }
+                NodeType::Leaf(LeafNode { children, .. }) => {
+                    end_of_table = children.is_empty();
+                    break;
+                }
+            }
+        }
+        Cursor {
+            offset: cursor,
+            cell_num: 0,
+            end_of_table,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +299,7 @@ mod tests {
     use std::fs::OpenOptions;
 
     use crate::btree::BTree;
+    use crate::cursor::Cursor;
     use crate::pager::Pager;
     use crate::Row;
 
@@ -288,11 +317,9 @@ mod tests {
         test_db_file_truncate();
         let pager = Pager::open("test.db");
         let mut bt = BTree::new(pager);
+        let count = 60;
 
-        for i in 0..15 {
-            if i == 14 {
-                println!("18");
-            }
+        for i in 0..count {
             assert!(bt.insert(
                 i,
                 Row {
@@ -302,6 +329,12 @@ mod tests {
                 }
             ));
         }
-        dbg!(bt);
+        let mut cursor = bt.cursor_start();
+        let mut i: u32 = 0;
+        while !cursor.is_at_end_of_table() {
+            assert_eq!(cursor.value(&bt).id, i);
+            bt.advance_cursor(&mut cursor);
+            i += 1;
+        }
     }
 }

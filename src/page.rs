@@ -2,8 +2,8 @@ use std::fmt::{Debug, Formatter};
 use std::io::Write;
 
 use crate::btree::{
-    CELL_KEY_SIZE, CELL_OFFSET, CELL_SIZE, CELL_VALUE_SIZE, IS_ROOT_OFFSET, NUM_CELLS_OFFSET,
-    PARENT_OFFSET,
+    CELL_KEY_SIZE, CELL_OFFSET, CELL_SIZE, CELL_VALUE_SIZE, IS_ROOT_OFFSET, NODE_TYPE_OFFSET,
+    NUM_CELLS_OFFSET, PARENT_OFFSET,
 };
 use crate::datastore::ROW_SIZE;
 use crate::node::Node;
@@ -123,7 +123,11 @@ impl TryFrom<&Page> for Node<usize, Row> {
     type Error = ();
 
     fn try_from(value: &Page) -> Result<Self, Self::Error> {
-        let mut node = Node::leaf();
+        let mut node = if value.0[NODE_TYPE_OFFSET] == 0 {
+            Node::leaf()
+        } else {
+            Node::internal()
+        };
         node.is_root = value.is_root_node();
         if !node.is_root {
             node.parent_offset = value.parent_offset();
@@ -152,7 +156,7 @@ impl TryFrom<&Page> for Node<usize, Row> {
                 ref mut children,
             }) => {
                 let rightmost = value.rightmost_child();
-                for slot in 0..=rightmost {
+                for slot in 0..rightmost {
                     let child_left = INTERNAL_CHILDREN_OFFSET + (slot * INTERNAL_CHILD_SIZE);
                     let child_key = child_left + 4;
                     let child_right = child_key + 4;
@@ -187,6 +191,7 @@ impl TryFrom<&Node<usize, Row>> for Page {
 
         match value.node_type {
             NodeType::Leaf(LeafNode { ref children, .. }) => {
+                page.0[NODE_TYPE_OFFSET] = 0;
                 let mut i = 0;
                 for KeyValuePair { key, value } in children {
                     page.set_cell(i, *key, value);
@@ -197,6 +202,7 @@ impl TryFrom<&Node<usize, Row>> for Page {
                 ref separators,
                 ref children,
             }) => {
+                page.0[NODE_TYPE_OFFSET] = 1;
                 page.set_rightmost_child(children.len() - 1);
                 for (slot, ((&key, left), right)) in separators
                     .iter()

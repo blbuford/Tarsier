@@ -39,7 +39,7 @@ impl Cursor {
     }
 
     pub fn value(&self, tree: &BTree) -> Row {
-        tree.get(&self.offset, self.cell_num)
+        tree.get(&self.offset, self.cell_num).unwrap()
     }
 
     pub fn is_at_end_of_table(&self) -> bool {
