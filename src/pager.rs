@@ -22,14 +22,14 @@ impl Display for Offset {
 }
 
 #[derive(Debug)]
-pub struct Pager {
+pub struct Pager<K, V> {
     file: RefCell<File>,
     num_pages: Cell<usize>,
-    cache: RefCell<HashMap<Offset, Page>>,
+    cache: HashMap<Offset, Node<K, V>>,
     free_pages: RefCell<BinaryHeap<Reverse<Offset>>>,
 }
 
-impl Pager {
+impl<K, V> Pager<K, V> {
     pub fn open(filename: impl AsRef<Path>) -> Self {
         let file = OpenOptions::new()
             .read(true)
@@ -47,7 +47,7 @@ impl Pager {
                 Self {
                     file: RefCell::new(file),
                     num_pages,
-                    cache: RefCell::new(HashMap::new()),
+                    cache: HashMap::new(),
                     free_pages: RefCell::new(BinaryHeap::new()),
                 }
             }
@@ -73,64 +73,70 @@ impl Pager {
     }
 
     pub fn recycle(&mut self, offset: Offset) {
+        self.cache.remove(&offset);
         self.free_pages.borrow_mut().push(Reverse(offset));
     }
 
-    pub fn get(&self, page: &Offset) -> Node<usize, Row> {
-        if self.cache.borrow().get(page).is_none() {
-            if page.0 < self.num_pages.get() {
-                self.file
-                    .borrow_mut()
-                    .seek(SeekFrom::Start((page.0 * PAGE_SIZE) as u64))
-                    .expect("Unable to seek to location in file.");
-                let mut page_raw = Box::new([0 as u8; PAGE_SIZE]);
-                match self.file.borrow_mut().read(page_raw.as_mut()) {
-                    Ok(_bytes_read) => self
-                        .cache
-                        .borrow_mut()
-                        .insert(page.clone(), Page::load(page_raw)),
-                    Err(why) => {
-                        println!("Unable to read file: {why}");
-                        exit(-1);
-                    }
-                };
-            } else {
-                self.cache.borrow_mut().insert(page.clone(), Page::new());
-                self.num_pages.set(self.num_pages.get() + 1);
-            }
+    pub fn get(&self, page: &Offset) -> &Node<K, V> {
+        match self.cache.get(page) {
+            Some(node) => node,
+            // TODO: Make this return an option, thus negating the need to panic
+            None => panic!("Fetched a non-existent page!"),
         }
-
-        let mut node = Node::try_from(self.cache.borrow().get(&page).unwrap()).unwrap();
-        node.offset = page.clone();
-        node
     }
+    pub fn get_mut(&mut self, page: &Offset) -> &mut Node<K, V> {
+        match self.cache.get_mut(page) {
+            Some(node) => node,
+            // TODO: Make this return an option, thus negating the need to panic
+            None => panic!("Fetched a non-existent page!"),
+        }
+    }
+    //     pub fn create_node(&mut self, page: &Offset) -> &Node<K, V> {
+    //     if self.cache.get(page).is_none() {
+    //         if page.0 < self.num_pages.get() {
+    //             self.file
+    //                 .borrow_mut()
+    //                 .seek(SeekFrom::Start((page.0 * PAGE_SIZE) as u64))
+    //                 .expect("Unable to seek to location in file.");
+    //             let mut page_raw = Box::new([0 as u8; PAGE_SIZE]);
+    //             match self.file.borrow_mut().read(page_raw.as_mut()) {
+    //                 Ok(_bytes_read) => self
+    //                     .cache
+    //                     .insert(page.clone(), Page::load(page_raw)),
+    //                 Err(why) => {
+    //                     println!("Unable to read file: {why}");
+    //                     exit(-1);
+    //                 }
+    //             };
+    //         } else {
+    //             self.cache.borrow_mut().insert(page.clone(), Page::new());
+    //             self.num_pages.set(self.num_pages.get() + 1);
+    //         }
+    //     }
+    //
+    //     let mut node = Node::try_from(self.cache.borrow().get(&page).unwrap()).unwrap();
+    //     node.offset = page.clone();
+    //     node
+    // }
 
-    pub fn commit(&mut self, n: &Node<usize, Row>) {
-        match n.try_into() {
-            Ok(new_page) => {
-                if n.offset().0 > self.num_pages.get() {
-                    self.num_pages.set(n.offset().0 + 1);
-                }
-                dbg!(n.offset());
-                self.cache.borrow_mut().insert(n.offset(), new_page);
-            }
-            Err(_) => {
-                println!("Unable to commit page {}", n.offset());
-                exit(-1);
-            }
+    pub fn commit(&mut self, offset: Offset, node: Node<K, V>) {
+        if let Some(_old_node) = self.cache.insert(offset, node) {
+            panic!("You just committed over an existing node. Probable corruption!")
         }
     }
 
     pub fn close(&mut self) {
         for i in 0..self.num_pages.get() {
-            let map = self.cache.get_mut();
             let offset = Offset(i);
-            let page = map.get_mut(&offset);
+            let page = self.cache.get(&offset);
             self.file
                 .borrow_mut()
                 .seek(SeekFrom::Start(0))
                 .expect("Seeking start of the file");
-            match page.map(|page| page.write(self.file.borrow_mut().deref())) {
+            match page
+                .map(|node| Page::try_from(node))
+                .map(|page| page.map(|p| p.write(self.file.borrow_mut().deref())))
+            {
                 Some(Ok(bytes_written)) => {
                     if i < self.num_pages.get() - 1 {
                         self.file

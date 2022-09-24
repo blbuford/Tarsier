@@ -332,7 +332,8 @@ mod tests {
         let mut cursor = bt.cursor_start();
         let mut i: u32 = 0;
         while !cursor.is_at_end_of_table() {
-            assert_eq!(cursor.value(&bt).id, i);
+            let val = cursor.value(&bt).id;
+            assert_eq!(val, i);
             bt.advance_cursor(&mut cursor);
             i += 1;
         }
