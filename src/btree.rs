@@ -17,16 +17,16 @@ pub const CELL_SIZE: usize = CELL_VALUE_SIZE + CELL_KEY_SIZE;
 #[derive(Debug)]
 pub struct BTree {
     root: Offset,
-    pager: Pager,
+    pager: Pager<Node<usize, Row>>,
     is_empty: bool,
 }
 
 impl BTree {
-    pub fn new(mut pager: Pager) -> Self {
+    pub fn new(mut pager: Pager<Node<usize, Row>>) -> Self {
         if pager.num_pages() == 0 {
-            let mut root_node = pager.get(&Offset(0));
+            let mut root_node = Node::leaf();
             root_node.is_root = true;
-            pager.commit(&root_node);
+            pager.commit(root_node);
             Self {
                 root: Offset(0),
                 pager,
@@ -45,7 +45,7 @@ impl BTree {
 
     pub fn get(&self, offset: &Offset, cell_num: usize) -> Option<Row> {
         let node = self.pager.get(offset);
-        match node.node_type {
+        match node.node_type() {
             NodeType::Leaf(LeafNode { children, .. }) => {
                 children.get(cell_num).map(|kv| kv.value.clone())
             }
@@ -63,7 +63,7 @@ impl BTree {
             InsertResult::ParentSplit(x) => x,
         };
         //infamous root split case
-        let mut root_node = self.pager.get(&self.root);
+        let mut root_node = self.pager.get_mut(&self.root);
         let grow_tree = if let NodeType::Leaf(_) = root_node.node_type {
             true
         } else {
@@ -72,7 +72,7 @@ impl BTree {
         if grow_tree {
             // root is either a leaf node and we're making it an internal
             // or its internal and we're splitting it up
-            let mut new_root = Node::internal();
+            let mut new_root: Node<usize, Row> = Node::internal();
             new_root.is_root = true;
             new_root.offset = Offset(0);
             root_node.offset = self.pager.new_page();
@@ -86,9 +86,8 @@ impl BTree {
                 children.push(root_node.offset);
                 children.push(tree.offset);
             }
-            self.pager.commit(&new_root);
-            self.pager.commit(&root_node);
-            self.pager.commit(&tree);
+            self.pager.commit(new_root);
+            self.pager.commit(tree);
         } else {
             if let NodeType::Internal(InternalNode {
                 ref mut separators,
@@ -98,7 +97,6 @@ impl BTree {
                 separators.push(separator);
                 children.push(tree.offset);
             }
-            self.pager.commit(&root_node)
         }
         self.is_empty = false;
         true
@@ -112,8 +110,8 @@ impl BTree {
     }
 
     pub fn advance_cursor(&self, cursor: &mut Cursor) {
-        let node = self.pager.get(cursor.offset());
-        match node.node_type {
+        let node: &Node<usize, Row> = self.pager.get(cursor.offset());
+        match node.node_type() {
             NodeType::Internal(..) => panic!("Cursors shouldn't point at internal nodes"),
             NodeType::Leaf(LeafNode {
                 children,
@@ -146,7 +144,7 @@ impl BTree {
         self._find(k, &self.root)
     }
     fn _find(&self, k: usize, offset: &Offset) -> Result<Cursor, Cursor> {
-        let node = self.pager.get(offset);
+        let node: &Node<usize, Row> = self.pager.get(offset);
         if let NodeType::Internal(InternalNode {
             ref separators,
             ref children,
@@ -164,7 +162,7 @@ impl BTree {
     }
 
     fn _insert(&mut self, offset: &Offset, k: usize, value: Row) -> InsertResult<usize, Row> {
-        let mut node = self.pager.get(offset);
+        let mut node = self.pager.get_mut(offset);
         if let NodeType::Internal(InternalNode {
             ref mut separators,
             ref mut children,
@@ -183,7 +181,7 @@ impl BTree {
                     mut tree,
                 }) => {
                     tree.parent_offset = Some(offset.clone());
-                    let mut left_child = self.pager.get(child_offset);
+                    let mut left_child: &mut Node<usize, Row> = self.pager.get_mut(child_offset);
                     tree.set_last_leaf(Some(left_child.offset));
 
                     // Voodoo to insert tree into the middle of two leaves
@@ -191,18 +189,16 @@ impl BTree {
                         .set_next_leaf(Some(tree.offset))
                         .map(|right_child_offset| {
                             tree.set_next_leaf(Some(right_child_offset));
-                            let mut right_child = self.pager.get(&right_child_offset);
+                            let mut right_child: &mut Node<usize, Row> =
+                                self.pager.get_mut(&right_child_offset);
                             right_child.set_last_leaf(Some(tree.offset));
-                            self.pager.commit(&right_child);
                         });
 
                     let location = separators.binary_search(&separator).unwrap_err();
                     separators.insert(location, separator.clone());
-                    self.pager.commit(&tree);
-                    self.pager.commit(&left_child);
-                    children.insert(location + 1, tree.offset);
-                    node.is_dirty = true;
 
+                    children.insert(location + 1, tree.offset);
+                    self.pager.commit(tree);
                     return if separators.len() >= MAX_INTERNAL_NODES {
                         //split internal
                         let upper_keys = separators.split_off((separators.len() / 2) - 1);
@@ -215,24 +211,10 @@ impl BTree {
                         InsertResult::Success
                     };
                 }
-                result => {
-                    if node.is_dirty {
-                        self.pager.commit(&node);
-                        node.is_dirty = false;
-                    }
-                    result
-                }
+                result => result,
             }
         } else {
-            match self.insert_leaf(&mut node, value.id as usize, value) {
-                result => {
-                    if node.is_dirty {
-                        self.pager.commit(&node);
-                        node.is_dirty = false;
-                    }
-                    result
-                }
-            }
+            self.insert_leaf(&mut node, value.id as usize, value)
         }
     }
     pub fn insert_leaf(
@@ -250,7 +232,6 @@ impl BTree {
                 Err(index) => index,
             };
             children.insert(location, KeyValuePair { key, value });
-            node.is_dirty = true;
 
             return if children.len() <= MAX_LEAF_NODES {
                 node.num_cells += 1;
@@ -275,8 +256,8 @@ impl BTree {
         let mut cursor = self.root.clone();
         let mut end_of_table = false;
         loop {
-            let node = self.pager.get(&cursor);
-            match node.node_type {
+            let node: &Node<usize, Row> = self.pager.get(&cursor);
+            match node.node_type() {
                 NodeType::Internal(InternalNode { children, .. }) => {
                     cursor = children.first().unwrap().clone()
                 }

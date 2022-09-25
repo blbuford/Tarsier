@@ -119,10 +119,8 @@ impl Debug for Page {
     }
 }
 
-impl TryFrom<&Page> for Node<usize, Row> {
-    type Error = ();
-
-    fn try_from(value: &Page) -> Result<Self, Self::Error> {
+impl From<&Page> for Node<usize, Row> {
+    fn from(value: &Page) -> Self {
         let mut node = if value.0[NODE_TYPE_OFFSET] == 0 {
             Node::leaf()
         } else {
@@ -176,14 +174,12 @@ impl TryFrom<&Page> for Node<usize, Row> {
             }
         }
 
-        Ok(node)
+        node
     }
 }
 
-impl TryFrom<&Node<usize, Row>> for Page {
-    type Error = ();
-
-    fn try_from(value: &Node<usize, Row>) -> Result<Self, Self::Error> {
+impl<'a> From<&'a Node<usize, Row>> for Page {
+    fn from(value: &'a Node<usize, Row>) -> Self {
         let mut page = Page::new();
         page.set_root_node(value.is_root);
         page.set_parent_offset(value.parent_offset);
@@ -215,6 +211,6 @@ impl TryFrom<&Node<usize, Row>> for Page {
             }
         }
 
-        Ok(page)
+        page
     }
 }

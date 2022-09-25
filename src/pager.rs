@@ -22,14 +22,14 @@ impl Display for Offset {
 }
 
 #[derive(Debug)]
-pub struct Pager<K, V> {
+pub struct Pager<T> {
     file: RefCell<File>,
     num_pages: Cell<usize>,
-    cache: HashMap<Offset, Node<K, V>>,
+    cache: HashMap<Offset, T>,
     free_pages: RefCell<BinaryHeap<Reverse<Offset>>>,
 }
 
-impl<K, V> Pager<K, V> {
+impl<T> Pager<T> {
     pub fn open(filename: impl AsRef<Path>) -> Self {
         let file = OpenOptions::new()
             .read(true)
@@ -77,55 +77,62 @@ impl<K, V> Pager<K, V> {
         self.free_pages.borrow_mut().push(Reverse(offset));
     }
 
-    pub fn get(&self, page: &Offset) -> &Node<K, V> {
+    pub fn get(&self, page: &Offset) -> &T {
         match self.cache.get(page) {
             Some(node) => node,
             // TODO: Make this return an option, thus negating the need to panic
             None => panic!("Fetched a non-existent page!"),
         }
     }
-    pub fn get_mut(&mut self, page: &Offset) -> &mut Node<K, V> {
+    pub fn get_mut(&mut self, page: &Offset) -> &mut T {
         match self.cache.get_mut(page) {
             Some(node) => node,
             // TODO: Make this return an option, thus negating the need to panic
             None => panic!("Fetched a non-existent page!"),
         }
     }
-    //     pub fn create_node(&mut self, page: &Offset) -> &Node<K, V> {
-    //     if self.cache.get(page).is_none() {
-    //         if page.0 < self.num_pages.get() {
-    //             self.file
-    //                 .borrow_mut()
-    //                 .seek(SeekFrom::Start((page.0 * PAGE_SIZE) as u64))
-    //                 .expect("Unable to seek to location in file.");
-    //             let mut page_raw = Box::new([0 as u8; PAGE_SIZE]);
-    //             match self.file.borrow_mut().read(page_raw.as_mut()) {
-    //                 Ok(_bytes_read) => self
-    //                     .cache
-    //                     .insert(page.clone(), Page::load(page_raw)),
-    //                 Err(why) => {
-    //                     println!("Unable to read file: {why}");
-    //                     exit(-1);
-    //                 }
-    //             };
-    //         } else {
-    //             self.cache.borrow_mut().insert(page.clone(), Page::new());
-    //             self.num_pages.set(self.num_pages.get() + 1);
-    //         }
-    //     }
-    //
-    //     let mut node = Node::try_from(self.cache.borrow().get(&page).unwrap()).unwrap();
-    //     node.offset = page.clone();
-    //     node
-    // }
+    pub fn fetch_page(&mut self, page: &Offset)
+    where
+        T: From<Page>,
+    {
+        if self.cache.get(page).is_none() {
+            if page.0 < self.num_pages.get() {
+                self.file
+                    .borrow_mut()
+                    .seek(SeekFrom::Start((page.0 * PAGE_SIZE) as u64))
+                    .expect("Unable to seek to location in file.");
+                let mut page_raw = Box::new([0 as u8; PAGE_SIZE]);
+                match self.file.borrow_mut().read(page_raw.as_mut()) {
+                    Ok(_bytes_read) => self
+                        .cache
+                        .insert(page.clone(), T::from(Page::load(page_raw))),
+                    Err(why) => {
+                        println!("Unable to read file: {why}");
+                        exit(-1);
+                    }
+                };
+            } else {
+                panic!(
+                    "tried to fetch a page greater than the number of pages thought to be on disk!"
+                )
+            }
+        }
+    }
 
-    pub fn commit(&mut self, offset: Offset, node: Node<K, V>) {
-        if let Some(_old_node) = self.cache.insert(offset, node) {
+    pub fn commit(&mut self, node: T)
+    where
+        T: HasOffset,
+    {
+        if let Some(_old_node) = self.cache.insert(node.offset(), node) {
             panic!("You just committed over an existing node. Probable corruption!")
         }
     }
 
-    pub fn close(&mut self) {
+    pub fn close<'a>(&mut self)
+    where
+        T: 'a,
+        Page: From<&'a T>,
+    {
         for i in 0..self.num_pages.get() {
             let offset = Offset(i);
             let page = self.cache.get(&offset);
@@ -134,8 +141,8 @@ impl<K, V> Pager<K, V> {
                 .seek(SeekFrom::Start(0))
                 .expect("Seeking start of the file");
             match page
-                .map(|node| Page::try_from(node))
-                .map(|page| page.map(|p| p.write(self.file.borrow_mut().deref())))
+                .map(|node| Page::from(node))
+                .map(|page| page.write(self.file.borrow_mut().deref()))
             {
                 Some(Ok(bytes_written)) => {
                     if i < self.num_pages.get() - 1 {

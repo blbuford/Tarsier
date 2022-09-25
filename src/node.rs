@@ -21,7 +21,6 @@ pub struct SplitEntry<K, V> {
 #[derive(Debug, Clone)]
 pub struct Node<K, V> {
     pub(crate) is_root: bool,
-    pub(crate) is_dirty: bool,
     pub(crate) node_type: NodeType<K, V>,
     pub(crate) parent_offset: Option<Offset>,
     pub(crate) num_cells: usize,
@@ -32,7 +31,6 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
     pub fn leaf() -> Self {
         Self {
             is_root: false,
-            is_dirty: true,
             node_type: NodeType::leaf_new(),
             parent_offset: None,
             num_cells: 0,
@@ -44,7 +42,6 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
         let num_cells = children.len();
         Self {
             is_root: false,
-            is_dirty: true,
             node_type: NodeType::leaf_with_children(children),
             parent_offset: None,
             num_cells,
@@ -55,7 +52,6 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
     pub fn internal() -> Self {
         Self {
             is_root: false,
-            is_dirty: true,
             node_type: NodeType::internal_new(),
             parent_offset: None,
             num_cells: 0,
@@ -66,7 +62,6 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
     pub fn internal_with_separators(keys: Vec<K>, children: Vec<Offset>) -> Self {
         Self {
             is_root: false,
-            is_dirty: true,
             node_type: NodeType::internal_with_separators(keys, children),
             parent_offset: None,
             num_cells: 0,
@@ -173,6 +168,10 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
         }
     }
 
+    pub fn node_type(&self) -> &NodeType<K, V> {
+        &self.node_type
+    }
+
     pub fn largest_key(&self) -> Option<&K> {
         if let NodeType::Leaf(LeafNode { ref children, .. }) = self.node_type {
             children.iter().last().map(|pair| &pair.key)
@@ -224,6 +223,7 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
         }
     }
 
+    /// Takes a `next` and returns what it replaced
     pub fn set_next_leaf(&mut self, next: Option<Offset>) -> Option<Offset> {
         if let NodeType::Leaf(LeafNode { mut next_leaf, .. }) = self.node_type {
             match next {
