@@ -7,6 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::path::Path;
 use std::process::exit;
+use std::rc::Rc;
 
 use crate::node::Node;
 use crate::page::{Page, PAGE_SIZE};
@@ -21,11 +22,12 @@ impl Display for Offset {
     }
 }
 
+type Pageable<T> = Rc<RefCell<T>>;
 #[derive(Debug)]
 pub struct Pager<T> {
     file: RefCell<File>,
     num_pages: Cell<usize>,
-    cache: HashMap<Offset, T>,
+    cache: HashMap<Offset, Pageable<T>>,
     free_pages: RefCell<BinaryHeap<Reverse<Offset>>>,
 }
 
@@ -58,6 +60,7 @@ impl<T> Pager<T> {
         }
     }
 
+    /// Returns the offset of the next free page to be used
     pub fn new_page(&self) -> Offset {
         return if let Ok(mut pq) = self.free_pages.try_borrow_mut() {
             if pq.is_empty() {
@@ -72,25 +75,33 @@ impl<T> Pager<T> {
         };
     }
 
-    pub fn recycle(&mut self, offset: Offset) {
-        self.cache.remove(&offset);
-        self.free_pages.borrow_mut().push(Reverse(offset));
+    /// Moves an entry to a different offset in cache
+    pub fn move_entry(&mut self, old: &Offset, new: Offset) {
+        let entry = self.cache.remove(old);
+        entry.map(|e| self.cache.insert(new, e)).flatten();
     }
 
-    pub fn get(&self, page: &Offset) -> &T {
+    /// Removes an item from the cache, if successfully then adds to the free pages
+    pub fn recycle(&mut self, offset: &Offset) -> Option<Pageable<T>>
+    where
+        T: Debug,
+    {
+        let r = self.cache.remove(offset);
+        if r.is_some() {
+            self.free_pages.borrow_mut().push(Reverse(offset.clone()));
+        }
+        r
+    }
+
+    pub fn get(&self, page: &Offset) -> Pageable<T> {
         match self.cache.get(page) {
-            Some(node) => node,
+            Some(node) => node.clone(),
             // TODO: Make this return an option, thus negating the need to panic
             None => panic!("Fetched a non-existent page!"),
         }
     }
-    pub fn get_mut(&mut self, page: &Offset) -> &mut T {
-        match self.cache.get_mut(page) {
-            Some(node) => node,
-            // TODO: Make this return an option, thus negating the need to panic
-            None => panic!("Fetched a non-existent page!"),
-        }
-    }
+
+    /// given an offset, retrieve that page from the disk, and put the node in the cache.
     pub fn fetch_page(&mut self, page: &Offset)
     where
         T: From<Page>,
@@ -103,9 +114,10 @@ impl<T> Pager<T> {
                     .expect("Unable to seek to location in file.");
                 let mut page_raw = Box::new([0 as u8; PAGE_SIZE]);
                 match self.file.borrow_mut().read(page_raw.as_mut()) {
-                    Ok(_bytes_read) => self
-                        .cache
-                        .insert(page.clone(), T::from(Page::load(page_raw))),
+                    Ok(_bytes_read) => self.cache.insert(
+                        page.clone(),
+                        Rc::new(RefCell::new(T::from(Page::load(page_raw)))),
+                    ),
                     Err(why) => {
                         println!("Unable to read file: {why}");
                         exit(-1);
@@ -119,28 +131,46 @@ impl<T> Pager<T> {
         }
     }
 
+    /// commits a new node to the cache to be fsync'd at some point in time... later. Raises the `num_pages` where applicable.
     pub fn commit(&mut self, node: T)
     where
         T: HasOffset,
     {
-        if let Some(_old_node) = self.cache.insert(node.offset(), node) {
+        if node.offset().0 > self.num_pages() {
+            assert_eq!(self.num_pages() + 1, node.offset().0);
+            self.num_pages.set(node.offset().0);
+        }
+        if let Ok(mut pq) = self.free_pages.try_borrow_mut() {
+            if !pq.is_empty() && pq.peek().unwrap().0 == node.offset() {
+                pq.pop();
+            }
+        }
+        if let Some(_old_node) = self
+            .cache
+            .insert(node.offset(), Rc::new(RefCell::new(node)))
+        {
             panic!("You just committed over an existing node. Probable corruption!")
         }
     }
 
-    pub fn close<'a>(&mut self)
+    /// forcible fsync of all pages and drop them from the cache.
+    pub fn close(&mut self)
     where
-        T: 'a,
-        Page: From<&'a T>,
+        Page: From<T>,
+        T: Debug,
     {
         for i in 0..self.num_pages.get() {
             let offset = Offset(i);
-            let page = self.cache.get(&offset);
+            let entry = self
+                .cache
+                .remove(&offset)
+                .map(|e| Rc::try_unwrap(e).unwrap().into_inner());
+
             self.file
                 .borrow_mut()
                 .seek(SeekFrom::Start(0))
                 .expect("Seeking start of the file");
-            match page
+            match entry
                 .map(|node| Page::from(node))
                 .map(|page| page.write(self.file.borrow_mut().deref()))
             {

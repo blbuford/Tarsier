@@ -172,6 +172,10 @@ impl<K: Ord + Clone, V: Debug> Node<K, V> {
         &self.node_type
     }
 
+    pub fn node_type_mut(&mut self) -> &mut NodeType<K, V> {
+        &mut self.node_type
+    }
+
     pub fn largest_key(&self) -> Option<&K> {
         if let NodeType::Leaf(LeafNode { ref children, .. }) = self.node_type {
             children.iter().last().map(|pair| &pair.key)

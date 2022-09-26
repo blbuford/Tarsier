@@ -178,8 +178,14 @@ impl From<&Page> for Node<usize, Row> {
     }
 }
 
-impl<'a> From<&'a Node<usize, Row>> for Page {
-    fn from(value: &'a Node<usize, Row>) -> Self {
+impl From<Node<usize, Row>> for Page {
+    fn from(n: Node<usize, Row>) -> Self {
+        Page::from(&n)
+    }
+}
+
+impl From<&Node<usize, Row>> for Page {
+    fn from(value: &Node<usize, Row>) -> Self {
         let mut page = Page::new();
         page.set_root_node(value.is_root);
         page.set_parent_offset(value.parent_offset);
